@@ -14,13 +14,9 @@ Put your own AI agent into a Microsoft Teams call as a real participant, in your
 
 ## Demo
 
-[![StandIn: set up on OpenClaw, then a live Teams call](assets/standin-demo.gif)](https://github.com/komaa-com/standin/blob/main/assets/standin-demo.mp4)
-
-
 https://github.com/user-attachments/assets/9ea69e04-e364-46ba-a559-9d33f40710b5
 
-
-A 90-second walkthrough: set up StandIn on OpenClaw, then a real Microsoft Teams call where the agent answers, sees the shared screen, speaks when addressed, and appears as a lip-synced avatar on its tile. [Watch the full video with audio](https://github.com/komaa-com/standin/blob/main/assets/standin-demo.mp4).
+A 90-second walkthrough: set up StandIn on OpenClaw, then a real Microsoft Teams call where the agent answers, sees the shared screen, speaks when addressed, and appears as a lip-synced avatar on its tile.
 
 ## What it does
 
