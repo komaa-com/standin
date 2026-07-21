@@ -41,14 +41,14 @@ Seven backends, published on npm and PyPI:
 | **[LiveKit](https://github.com/komaa-com/livekit-msteams-bridge)** | Any LiveKit Agent, including avatar agents | [![npm](https://img.shields.io/npm/v/@komaa/livekit-msteams-bridge?label=npm&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/livekit-msteams-bridge) [![PyPI](https://img.shields.io/pypi/v/livekit-msteams-bridge?label=PyPI&color=3775a9&logo=pypi&logoColor=white&cacheSeconds=86400)](https://pypi.org/project/livekit-msteams-bridge/) |
 | **[OpenAI](https://github.com/komaa-com/openai-msteams-bridge)** | OpenAI Realtime (`gpt-realtime`) | [![npm](https://img.shields.io/npm/v/@komaa/openai-msteams-bridge?label=%40komaa%2Fopenai-msteams-bridge&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/openai-msteams-bridge) |
 | **[Deepgram](https://github.com/komaa-com/deepgram-msteams-bridge)** | A Deepgram Voice Agent | [![npm](https://img.shields.io/npm/v/@komaa/deepgram-msteams-bridge?label=npm&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/deepgram-msteams-bridge) [![PyPI](https://img.shields.io/pypi/v/deepgram-msteams-bridge?label=PyPI&color=3775a9&logo=pypi&logoColor=white&cacheSeconds=86400)](https://pypi.org/project/deepgram-msteams-bridge/) |
-| **[Cartesia](https://github.com/komaa-com/cartesia-msteams-bridge)** | A Cartesia Line voice agent | [![npm](https://img.shields.io/npm/v/@komaa/cartesia-msteams-bridge?label=%40komaa%2Fcartesia-msteams-bridge&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/cartesia-msteams-bridge) |
+| **[Cartesia](https://github.com/komaa-com/cartesia-msteams-bridge)** | A Cartesia Line voice agent | [![npm](https://img.shields.io/npm/v/@komaa/cartesia-msteams-bridge?label=npm&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/cartesia-msteams-bridge) [![PyPI](https://img.shields.io/pypi/v/cartesia-msteams-bridge?label=PyPI&color=3775a9&logo=pypi&logoColor=white&cacheSeconds=86400)](https://pypi.org/project/cartesia-msteams-bridge/) |
 
 Each backend name links to its source repository (Python siblings live in the matching `-py` repos). The Node and Python packages are interchangeable behind one wire contract, so you can switch backends without rewriting your integration.
 
 ## Quickstart
 
-1. Get a free identity at [standin.komaa.com](https://standin.komaa.com). No Azure bot, no card.
-2. Connect your own Azure bot and pick the backend that matches your stack from the table above.
+1. Try the free sandbox at [standin.komaa.com](https://standin.komaa.com): a shared demo bot, no Azure bot, no card.
+2. Ready to build? Create a free developer identity, connect your own Azure bot, and pick the backend that matches your stack from the table above.
 3. Follow its guide on [docs.komaa.com](https://docs.komaa.com), point your StandIn identity at the bridge, and place a call.
 
 ## How it works
