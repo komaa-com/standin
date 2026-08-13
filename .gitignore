@@ -1,0 +1,20 @@
+# This repo is PUBLIC. Anything committed here is world-readable the moment it is pushed,
+# and rewriting history does not un-publish it.
+
+# Real environment files. Only .env.example (placeholders) belongs in git.
+.env
+.env.*
+!.env.example
+
+# Credential material that gets dropped into a working tree during setup.
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+.npmrc
+.netrc
+
+# macOS Finder metadata. One of these reached a public repo once already.
+.DS_Store
