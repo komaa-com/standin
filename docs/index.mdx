@@ -126,28 +126,45 @@ page of its own. The cards go to the Python pages; the
     turn-taking, the pacing and the barge-in already written.
   </Card>
   <Card title="See what the caller is showing" icon="eye" href="/python-sdk/vision">
-    The camera and the screen share arrive as frames. The agent can look on demand, and show a chart
-    or a page back on the bot's tile.
+    The camera and the screen share arrive as frames. The agent looks on demand, looks back at a
+    slide already gone while the call is recorded, and shows a chart or a page back on the tile,
+    full screen or as a picture-in-picture inset. Six looks a minute by default, so a model cannot
+    look in a loop.
   </Card>
   <Card title="Wear a face" icon="face-smile" href="/python-sdk/avatar">
     Send the emotion and the viseme timeline that drives lip-sync. StandIn draws the tile; your
     worker sends the hints and never has to know how.
   </Card>
   <Card title="Behave in a meeting" icon="users" href="/python-sdk/group-calls">
-    Wake phrases, a follow-up window and verbal interrupts, so the agent answers what was addressed
-    to it and stays out of the rest.
+    Silent until a wake phrase names it, then twelve seconds of follow-up so the next question need
+    not. Verbal interrupts, and the speaker's name where StandIn sends unmixed audio. A 1:1 call
+    answers everything.
   </Card>
   <Card title="Do real work mid-call" icon="screwdriver-wrench" href="/python-sdk/call-tools">
     One set of call tools declared in every provider's own JSON, plus consulting and background work
     for the jobs too slow to hold a call open.
   </Card>
   <Card title="Follow up afterwards" icon="file-lines" href="/python-sdk/minutes">
-    Minutes of the call as a Word-openable document, and a call back to whoever asked for one, once
-    the answer exists.
+    Key points, decisions and action items, plus a Word-openable document that appends the
+    transcript attributed line by line to whoever said it. And a call back to whoever asked for one,
+    once the answer exists.
   </Card>
 </CardGroup>
 
-Chat is its own lane, with attachments in and pictures out: [Chat](/python-sdk/chat).
+Three more things worth knowing before you pick a shape.
+
+- **Two dialogue modes, both in the SDK.** One realtime speech-to-speech provider doing its own
+  turn-taking, or speech to text, then your agent, then speech, with the turn-taking, the pacing and
+  the barge-in already written. [Dialogue modes](/concepts/modes).
+- **Chat is a lane of its own.** A pasted screenshot, a dragged-in file and a voice note land as one
+  turn your agent can answer, voice notes transcribed by the engine you supply, and a reply can
+  carry a picture back. [Chat](/python-sdk/chat).
+- **The expensive and the sensitive are off until you switch them on.** Outbound calling refuses
+  everyone until you list who the agent may ring, then caps it at six an hour. A local file is
+  refused until you name a root it may come from. No history of the caller's screen is kept unless
+  the call is being recorded. And who may call the agent is a check you write, because the handshake
+  proves the call came from StandIn and nothing more. [Security](/python-sdk/security).
+
 [What the SDK gives you](/concepts/features) is the full inventory, and the boundary that goes with
 it.
 

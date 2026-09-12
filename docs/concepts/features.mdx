@@ -1,5 +1,6 @@
 ---
 title: "What the SDK gives you"
+sidebarTitle: "SDK capabilities"
 description: "The capabilities the StandIn SDK actually exposes: the call seam, audio, vision and the avatar, recap, outbound calling, the chat lane, signatures and capacity, and what it deliberately does not do."
 keywords: ["StandIn SDK features","CallServer capacity","FrameAligner","ChatChannel","HMAC replay guard","Microsoft Teams bot security","StandIn SDK scope"]
 ---
@@ -47,9 +48,11 @@ where the page that owns it begins.
 
 ## Turning speech into a reply
 
-A realtime speech-to-speech provider does its own turn-taking. Every other shape needs somebody to
-decide where the caller stopped talking, ask three services in order, and feed the answer out at the
-rate a call consumes audio. That somebody is in the SDK.
+**There are two dialogue modes and the SDK carries both.** In the realtime one, a single
+speech-to-speech provider hears the caller and answers in voice, and it does its own turn-taking. In
+the streaming one, speech becomes text, your agent answers, and the answer becomes speech again.
+That second shape needs somebody to decide where the caller stopped talking, ask three services in
+order, and feed the answer out at the rate a call consumes audio. That somebody is in the SDK.
 
 - **`VoiceLane`**, built with your `transcribe`, `answer` and `synthesize`. It runs one turn at a
   time, a new utterance supersedes the one in flight rather than racing it, and a failed step is
@@ -65,6 +68,34 @@ rate a call consumes audio. That somebody is in the SDK.
 [Turn-taking](/python-sdk/voice) has the whole lane. [Dialogue modes](/concepts/modes) is where to
 start if you are still choosing a shape.
 
+## In a meeting, and who is speaking
+
+An agent that answers every turn of a meeting is worse than one that was never invited, so the
+etiquette is in the core rather than in each plugin.
+
+- **Silent until addressed.** `GroupGate` answers the turn that named the agent through one of your
+  wake phrases, and then keeps the floor open for `DEFAULT_FOLLOW_UP_WINDOW_MS`, twelve seconds, so
+  the follow-up question does not have to say the name again. `GateDecision` reports `respond` and
+  `addressed` separately, because a turn answered inside the window was not addressed and only an
+  addressed turn reopens it. `is_verbal_interrupt` sits beside the gate for the whole utterances
+  that are only "stop", "wait" or "never mind".
+- **A 1:1 always answers.** The gate arms itself off `session.start.thread_id`: a meeting or channel
+  conversation begins `19:` and arms it, a one-to-one call has no such thread at all, and every turn
+  of one is answered with `addressed` still reported truthfully. `note_participants(count)` is a
+  second, weaker signal that can only add certainty: a participant count never arrives on the
+  meeting-join path, so a gate keyed on the count alone is dead on exactly the calls it exists for.
+- **A gate nothing could open is off.** Configure no wake phrase and `gate.active` reports false and
+  every turn goes through. A gate with nothing that could ever open it would mute the agent for the
+  whole call, and silence is the one failure a caller cannot tell apart from a dead worker.
+- **Who said it.** `session.speaker` and the optional `on_speaker_change(name)` callback name the
+  person talking, which is what attributes a transcript line and tells a model who it is answering.
+  Both arrive only where StandIn sends unmixed audio: on the mixed path, which is most calls,
+  `session.speaker` is `None`, so build on it as a hint and never as a requirement.
+  `on_speaker_change` fires on change only, never per frame.
+
+[Group calls](/python-sdk/group-calls#wake-phrases-and-the-follow-up-window) has the gate, and
+[the optional callbacks](/python-sdk/call-handler#the-optional-callbacks) have the speaker.
+
 ## Seeing and being seen
 
 - **Frames in.** The caller's camera and screen share arrive as `VideoFrame`s over the same socket.
@@ -77,8 +108,22 @@ start if you are still choosing a shape.
   recording gate is **on** by default: continuously sending somebody's screen to a model is a
   different promise from glancing at it once. It keeps a reserve so the ambient lane cannot spend
   the whole vision budget and leave the caller's own "look at this" with nothing left.
+- **Looking back at what is already gone.** The session keeps the latest frame per source, which
+  answers "what am I looking at now". `KeyframeStore` answers "what was on that slide a moment ago",
+  which is what somebody actually asks after they have moved on, and the `look_back` tool is how a
+  model reaches it. Sixteen frames by default, latched per source so a screen nobody touched is kept
+  once, and it keeps **nothing at all unless the call is being recorded**: a history of somebody's
+  screen is a materially different promise from glancing at it once.
+- **A ceiling on looking.** `VisionBudget` allows six looks in any rolling minute by default, as a
+  sliding window rather than a total, so a long call is not punished for having been long. A look
+  that failed is refunded rather than charged. Its `reserve`, a quarter of the window and never less
+  than two, is the part only an explicit look may spend, which is why the ambient lane must be
+  handed the same budget object your `VisionTools` holds rather than building its own.
 - **Pictures out.** `display_image()` draws a chart, a page or a photo on the bot's tile for a few
-  seconds.
+  seconds. `DISPLAY_MODES` is the pair `fullscreen` and `overlay`, and the model picks one **per
+  picture**: an overlay is a picture-in-picture inset that keeps the face on screen, and it is
+  unreadable for a dense screenshot or a page of a document, which is exactly when somebody says
+  "show me".
 - **The avatar hints.** `express()` names the emotion the face should wear, `send_speech_marks()`
   carries the viseme timeline that drives lip-sync, and `estimate_visemes()` and `TurnLipSync`
   estimate that timeline from the text for the providers that return no timings at all.
@@ -89,7 +134,8 @@ start if you are still choosing a shape.
   `STANDIN_VISION_API_URL` is unset, and that nothing is the signal a plugin uses to tell an agent
   that looking is not available here.
 
-[Vision and the avatar](/python-sdk/vision) and [The avatar](/python-sdk/avatar) own this lane.
+[Vision and the avatar](/python-sdk/vision#the-tool-surface) and
+[The avatar](/python-sdk/avatar) own this lane.
 
 ## What the agent can do about the call
 
@@ -110,8 +156,23 @@ See [Call tools](/python-sdk/call-tools) and
 ## After the call, and reaching people
 
 - **Meeting recap.** `Transcript` collects the turns, `post_meeting_minutes` is the tool a model
-  calls to file them, and `write_minutes_docx` writes a Word-openable document with no dependency on
-  anything. [Meeting recap](/python-sdk/minutes).
+  calls to file them mid-call, and `post_minutes` is the function that writes them up and posts
+  them. `minutes_prompt` asks for Key Points, Decisions, Action Items and, when the agent saw
+  something, Presented, and it forbids inferring what was on screen: minutes that invent the numbers
+  on a dashboard are worse than minutes with a gap.
+- **Minutes that say who said it.** Each `Turn` keeps its speaker apart from its words, and
+  `write_minutes_docx` appends the transcript attributed line by line rather than filing the whole
+  call under one name. That is the half a transcript-only recap tool cannot produce, and it is worth
+  the most on the meeting calls where unmixed audio gives a real speaker per utterance.
+  `has_speaker_prefix` keeps a line that already carries its own name from being relabelled or
+  prefixed twice, because re-labelling destroys the one thing worth keeping and prefixing again
+  reads as a transcription fault. The document is Word-openable with no dependency on anything: a
+  `.docx` is a zip of four XML parts, and a document library would be a dependency every install
+  pays for so that the few who ask for minutes get a file. Minutes are delivered as **text** to one
+  conversation; the document is written **to disk**, and only when you name a `document_dir` for it.
+  `DOCUMENT_NOT_ATTACHED` is the sentence the message then carries, because a document promised into
+  the chat would be a promise that quietly fails.
+  [Meeting recap](/python-sdk/minutes#the-document).
 - **Outbound.** The `call_me_back` tool (`CALL_BACK_TOOL`) rings somebody who asked to be rung, and
   `OutboundLane` with `PendingMessages` parks the line **on disk** until they answer, because the
   answering leg is a different call and may be a different process: an in-memory store loses the
@@ -121,6 +182,16 @@ See [Call tools](/python-sdk/call-tools) and
   default. It also needs the `Calls.Initiate.All` consent in the
   [Graph permissions table](/teams/azure-bot#8-grant-graph-permissions).
   [Reaching people](/python-sdk/reaching-people).
+- **Nobody answers, so it goes to chat.** Chat is the one fallback this lane has: a parked answer
+  reaches the person in writing or not at all. When StandIn reports `no-answer`, `declined`, `busy`
+  or `failed`, the line the agent was holding is posted into the conversation the request came from,
+  prefixed so it reads as a missed call and worded for the person who missed it rather than for an
+  operator. One idempotency key covers both the reported outcome and the answer-timeout sweep,
+  because both can fire for one call and being told twice reads as a second attempt that never
+  happened. The one case with nowhere to go is a call whose thread is not a real conversation, which
+  `call_thread_is_postable` decides: that one is parked rather than posted somewhere wrong, because
+  an answer delivered into the wrong conversation is the worst outcome this lane has.
+  [The thread id is how an unanswered call still reaches them](/python-sdk/reaching-people#the-thread-id-is-how-an-unanswered-call-still-reaches-them).
 - **Speaking into a call already up.** `VoiceDelivery` says the line into a live call when there is
   one and only rings back when there is not, and it never raises: every refusal comes back as a
   sentence, because the thing reading it is either a host that would mark the whole platform failed
@@ -130,14 +201,9 @@ See [Call tools](/python-sdk/call-tools) and
 
 Four pieces most plugins used to carry themselves, each closing a failure that is invisible until a
 real call finds it. Two of them moved into the core precisely because copies had started to drift.
+[`GroupGate`](#in-a-meeting-and-who-is-speaking) above is the first of the four, and these are the
+other three.
 
-- **`GroupGate`**, with wake phrases and a follow-up window (`DEFAULT_FOLLOW_UP_WINDOW_MS`, twelve
-  seconds) that keeps the floor open after an addressed turn, so an agent in a meeting answers what
-  was addressed to it and stays out of the rest. `is_verbal_interrupt` sits beside it for the whole
-  utterances that are only "stop", "wait" or "never mind". Configure **no** wake phrase and the gate
-  reports itself off and lets every turn through: a gate nothing could ever open would mute the
-  agent for the entire call, and silence is the one failure a caller cannot tell apart from a dead
-  worker. [Group calls](/python-sdk/group-calls) has the rest.
 - **The echo guard**, so a speakerphone does not feed the agent its own playback and leave the model
   answering itself in a loop while the caller is silent. It is the `EchoGuard` class in Python and
   the `shouldSuppressEcho` function in TypeScript.
@@ -167,6 +233,11 @@ See [Group calls](/python-sdk/group-calls), [Realtime providers](/python-sdk/rea
   as one `ChatTurn` your agent can answer, and a reply can carry a picture back. See
   [Attachments in chat](/python-sdk/chat-attachments) and
   [Sending a picture](/python-sdk/sending-pictures).
+- **A voice note becomes text.** `transcribe_voice_messages` fetches the clips and runs the
+  `Transcriber` you supply, and `ChatTurn.voice_note` is what they said. Supply no transcriber and
+  it returns empty rather than raising, and one clip that fails costs that clip and nothing else: a
+  message with a picture and a voice note must still be answered.
+  [Voice notes](/python-sdk/chat-attachments#voice-notes).
 - **Per-conversation ordering and at-least-once dedupe**, so replies in a conversation cannot
   overtake each other and a redelivery does not run your agent twice.
 - **`SCHEMA_VERSION`** is a major version. Additive evolution does not bump it, because the schema
@@ -192,7 +263,26 @@ See [Group calls](/python-sdk/group-calls), [Realtime providers](/python-sdk/rea
     `call_id` is the value the handshake signed, never something a caller supplied, so it is safe to
     key your own state on.
   </Card>
+  <Card title="Who may call the agent" icon="user-check">
+    The handshake proves the call came from StandIn; `session.start` then names the human. Deciding
+    whether to answer **that** person is a deployment policy, and it is closed by default: an unset
+    or unknown policy refuses, so a typo in a config file cannot open the agent to everyone.
+  </Card>
 </CardGroup>
+
+Who may call is the one security decision that is not identical in the two languages. TypeScript
+ships it: `isInboundCallAllowed(inboundPolicy, allowFrom, from)` admits everyone under `"open"`,
+checks the list under `"allowlist"` and `"pairing"`, and refuses everything else, including
+`"disabled"` and an unset policy. `"pairing"` is enforced as a plain allowlist, because no pairing
+code is issued for a call: read it as a second name for `"allowlist"` rather than as a second
+mechanism. `isAllowlistedCaller` matches an exact caller id case-insensitively **or** a digits-only
+phone number, because a Microsoft Teams caller arrives as a directory object id that phone
+normalization would reduce to nothing; and `describeInboundRejection` writes the log line that tells
+an operator which list to add them to.
+Python ships no policy module: you write the same check in `on_start` and call `end(reason)` to
+refuse, which is [Refusing a call](/python-sdk/call-handler#refusing-a-call).
+[TypeScript](/typescript-sdk/security#who-may-call-the-agent),
+[Python](/python-sdk/security#what-the-secret-does-not-decide).
 
 <Warning>
 **One flag gates everything you keep.** `recording_active` / `recordingActive` says whether this
@@ -201,7 +291,28 @@ showed with a third party, and read it off the session rather than re-deriving i
 context sentence you happened to catch. The server starts it from the `session.start` snapshot and
 then follows every later recording status change, and a reported change wins over the snapshot
 whichever arrives first: an omitted snapshot field means the state was unknown at answer time, not
-"not recording". Both call-handler pages carry the detail:
+"not recording".
+
+**Know what it does and does not switch off.** Two things in the core gate what they **keep** on it:
+ambient vision, which checks it before a frame is even stored and has `require_recording` on by
+default, and `KeyframeStore`, which keeps nothing without it and so makes `look_back` a
+recorded-call capability. Nothing else in the core gates on it, and the **audio path does not**:
+`on_caller_audio` delivers every frame whether or not the call is being recorded, and an on-demand
+`look` at the current frame is not gated either. It is a flag about what may be **kept**, not a
+switch that stops media reaching your worker, so anything else you store stays yours to gate.
+
+Two more things read the flag, and neither is on that list. `OutboundLeg` reads it as a **signal**
+rather than a gate: recording turning active is the moment it treats the person as having picked up,
+because recording turning on is what happens when a Microsoft Teams call is actually connected and
+that is the nearest thing to a "they answered" there is.
+[Reaching people](/python-sdk/reaching-people) has that leg.
+
+A plugin may also add a gate the core does not have, and **the two shipped realtime plugins default
+opposite ways**, so read the page for the one you run rather than assuming. The Hermes plugin's
+[`require_recording`](/python-sdk/plugins/hermes-agent) keeps the caller's audio out of the model
+until the Microsoft Teams recording banner is up, and it is **on** unless you turn it off. The
+OpenClaw plugin's [`requireRecordingStatus`](/typescript-sdk/plugins/openclaw) does the same thing
+and is **off** unless you set it to exactly `true`. Both call-handler pages carry the flag itself:
 [Python](/python-sdk/call-handler), [TypeScript](/typescript-sdk/call-handler).
 </Warning>
 
