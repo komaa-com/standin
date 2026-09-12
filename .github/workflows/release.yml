@@ -137,14 +137,18 @@ jobs:
       url: https://www.npmjs.com/package/@komaa/standin-sdk
     permissions:
       contents: read
-      # Provenance: npm records which workflow, which commit and which tag
-      # produced the tarball, and shows it on the package page. It costs one
-      # permission and makes the supply chain checkable by anyone.
+      # Trusted publishing: npm verifies this run's OIDC identity against the
+      # publisher configured on the package, so no token lives in this
+      # repository at all. It is also what makes provenance automatic, which
+      # is why there is no --provenance flag below.
       id-token: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
+          # Trusted publishing needs npm 11.5.1 or newer on Node 22.14 or
+          # newer. Node 24 satisfies both; dropping this to an older Node
+          # silently falls back to looking for a token that is no longer here.
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
       - name: Install and build
@@ -154,11 +158,9 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd libraries/typescript
           # --access public because the package is scoped, and a scoped package
-          # defaults to restricted: the first publish would succeed and nobody
+          # defaults to restricted: the publish would succeed and nobody
           # outside the organisation could install it.
-          npm publish --access public --provenance
+          npm publish --access public

@@ -21,13 +21,10 @@ Node 20 or newer. Nothing else is required to answer a call.
 | Import | What it is | Needs installed |
 |---|---|---|
 | `@komaa/standin-sdk` | The core: `CallServer`, `CallHandler`, `ChatChannel`, the audio and HMAC helpers | nothing but `ws` |
-| `@komaa/standin-sdk/echo` | The smallest plugin that answers a real call. Copy it to start your own | nothing but `ws` |
-| `@komaa/standin-sdk/elevenlabs` | An ElevenLabs agent takes the call | nothing but `ws` |
-| `@komaa/standin-sdk/deepgram` | A Deepgram Voice Agent takes the call | nothing but `ws` |
-| `@komaa/standin-sdk/cartesia` | A Cartesia Line agent takes the call | nothing but `ws` |
-| `@komaa/standin-sdk/openai` | An OpenAI Realtime model takes the call | nothing but `ws` |
-| `@komaa/standin-sdk/livekit` | A LiveKit agent takes the call | `@livekit/rtc-node`, `livekit-server-sdk` |
 | `@komaa/standin-sdk/openclaw` | The OpenClaw gateway plugin | `openclaw` |
+| `@komaa/standin-sdk/livekit` | A LiveKit agent takes the call | `@livekit/rtc-node`, `livekit-server-sdk` |
+| `@komaa/standin-sdk/elevenlabs` | An ElevenLabs agent takes the call | nothing but `ws` |
+| `@komaa/standin-sdk/cartesia` | A Cartesia Line agent takes the call | nothing but `ws` |
 
 The core imports **nothing** from `src/plugins/`, so installing this package
 never drags a framework in behind you, and `import { CallServer } from
@@ -39,20 +36,8 @@ One package is what keeps the plugins honest with each other. A new
 capability lands in the core once and every plugin has it, instead of being
 threaded into one package per framework by hand.
 
-## Run the echo agent
-
-```bash
-npm install @komaa/standin-sdk
-STANDIN_SECRET=... npx standin-echo
-```
-
-Call your StandIn number and talk. You should hear yourself. Run this before you
-suspect your own agent: if the echo answers, your secret, your tunnel and your
-StandIn identity are all correct.
-
-From there, the [OpenClaw example](../../examples/openclaw-msteams-connector) is a
-complete deployment, and the [echo plugin](src/plugins/echo) is the
-file to copy for a custom one.
+The [OpenClaw example](../../examples/openclaw-msteams-connector) is a complete
+deployment to start from.
 
 The [Python SDK](../python) uses the same call handler contract and wire
 protocol. Shared conformance vectors check the behaviour of both SDKs. The

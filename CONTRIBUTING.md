@@ -329,9 +329,9 @@ Environment, and with required reviewers set on `pypi` and `npm` a pushed tag pa
 the Actions tab rather than uploading. You can also run the workflow by hand: it is a dry run that
 builds both packages and uploads nothing unless you type `publish`.
 
-PyPI uses trusted publishing, so there is no API token in the repository. npm uses `NPM_TOKEN` and
-publishes with provenance, which records on the package page which commit and which workflow built
-the tarball.
+Both registries use trusted publishing, so no API token lives in this repository. Each verifies the
+workflow run's own identity against a publisher configured on its side, and both record provenance
+on the package page: which commit and which workflow built the artifact.
 
 <!-- Neither package has been published yet. The first release is a deliberate decision, not a
      consequence of merging something. -->
