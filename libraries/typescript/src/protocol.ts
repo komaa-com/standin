@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Komaa DigiTech
 // SPDX-License-Identifier: MIT
 // GENERATED from protocol/schema.yaml; do not hand-edit.
-// Schema SHA-256: 44aab1ddff7b0dea5e067d3d34583fea7271da06aa521b4e1b10b1718d6a79e9
+// Schema SHA-256: 9157d78287022cc97566640007ea61c5336cb11c731ba5fcb15b0833b8048d5b
 // Regenerate with: python3 protocol/generate.py
 
 import { clean, normalizePongTimestamp } from "./protocolRuntime.js";
