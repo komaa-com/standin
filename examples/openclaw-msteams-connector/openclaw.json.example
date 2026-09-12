@@ -1,0 +1,37 @@
+{
+  "plugins": {
+    "load": {
+      "paths": [
+        "node_modules/@komaa/standin-sdk/dist/plugins/openclaw"
+      ]
+    },
+    "entries": {
+      "standin-msteams": {
+        "enabled": true,
+        "config": {
+          "secret": "sk_standin_REPLACE_ME",
+          "inboundPolicy": "allowlist",
+          "allowFrom": [
+            "00000000-0000-0000-0000-000000000000"
+          ],
+          "inboundGreeting": "Hi, this is your assistant. How can I help?",
+          "callingPort": 9442,
+          "bindAddress": "127.0.0.1",
+          "path": "/msteams/calling",
+          "maxConcurrentCalls": 4,
+          "requireRecordingStatus": false,
+          "realtime": {
+            "provider": "openai",
+            "providers": {
+              "openai": {
+                "apiKey": "sk-REPLACE_ME",
+                "voice": "alloy"
+              }
+            },
+            "instructions": "You are on a Microsoft Teams call. Keep answers short and spoken."
+          }
+        }
+      }
+    }
+  }
+}

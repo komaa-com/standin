@@ -1,0 +1,63 @@
+# Hermes config.yaml - the plugin half.
+#
+# Merge this into your existing <hermes home>/config.yaml. Only the
+# plugins: block is StandIn's; model:, stt: and tts: are yours already, and the
+# call uses them unchanged - which is the point. The assistant on the phone is
+# the assistant in your chat window.
+
+plugins:
+  # This is the whole opt-in. The key is the plugin's entry-point name.
+  enabled: [msteams_bridge]
+
+  entries:
+    msteams_bridge:
+      config:
+        # ---- who may call -------------------------------------------------
+        # AAD object ids. EMPTY DENIES EVERYONE: an unset allowlist must not
+        # read as "open to the tenant". Set allow_all: true to accept anyone,
+        # deliberately.
+        allowlist:
+          - "00000000-0000-0000-0000-000000000000"
+        # allow_all: true
+        # allowlist_allow_names: false   # display names are spoofable
+
+        # ---- what the caller gets ------------------------------------------
+        # per-call | per-thread | per-aad. per-aad gives a person one agent
+        # session across every call they make; it falls back to the call for a
+        # guest, who has no AAD id.
+        session_scope: per-aad
+
+        # Wait for the Teams recording banner before speaking or listening. On
+        # by default: in most tenants that banner is what tells the humans in
+        # the room that a bot is participating.
+        require_recording: true
+
+        # ---- in a meeting ---------------------------------------------------
+        # Stay silent until addressed by one of these, then keep answering for
+        # follow_up_window_ms without needing the name again.
+        wake_phrases: ["assistant", "hermes"]
+        require_address: true
+        follow_up_window_ms: 12000
+
+        # ---- delegating to the agent ---------------------------------------
+        # How long one hermes_agent_consult may take before the caller is told,
+        # in words, that it did not finish. Nothing promises a follow-up: the
+        # work is abandoned, not queued.
+        consult_timeout_s: 45
+        # consult_model: ""     # empty means your own model: block
+
+        # ---- the realtime provider ------------------------------------------
+        realtime:
+          voice: alloy
+          # model: gpt-realtime
+          # languages: ["en", "ar"]        # empty: detect and mirror the caller
+          #
+          # Azure instead of OpenAI:
+          # backend: azure
+          # azure_endpoint: "https://<resource>.openai.azure.com"
+          # azure_deployment: "<your realtime deployment>"
+          #
+          # Turning this off also disables the group gate and verbal interrupts,
+          # because both read the caller's transcript. The plugin warns when it
+          # starts a call that way.
+          # input_transcribe_model: whisper-1
