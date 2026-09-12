@@ -9,46 +9,61 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
-### Added
+## 0.1.0 - 2026-09-12
 
-- Turn-taking as one object: `VoiceLane` runs segmentation, transcription, the
-  agent and paced playback in order, so an agent that only reads and writes
-  text can hold a call.
-- The avatar surface: emotion cues, a viseme timeline estimated from the text
-  and the audio actually sent, for Latin and Arabic, and your own video on the
-  bot's tile.
-- Group calls: a wake-phrase gate with a follow-up window, and verbal
-  interrupts that stop playback in code rather than waiting for the model.
-- Meeting recap: section parsing, an attributed transcript in the document, and
-  a delivery target resolved once and pinned.
-- Reaching people: speak into a call that is already up, or ring back and park
-  the line until they answer.
-- An install check: `run_smoke` rings this worker's own handler on loopback and
-  reports what worked, with no provider bill, no tunnel and no Microsoft
-  tenant.
-- Chat attachments in, pictures out, and `MEDIA:` markers taken out of a reply
-  before anybody reads one aloud.
-- A web page on the tile through a renderer you supply, with the SDK's own
-  public-address guard in front of it.
+First release. Everything below is what the SDK contains rather than a delta,
+since there is nothing before it.
 
-### Changed
+The version is `0.1.0` and the Python package is classified Beta on purpose.
+The surface is tested and in use, and it is young enough that a name or a
+default may still move. A `1.0.0` is a promise about stability that is easier
+to make later than to walk back.
 
-- The short-utterance floor now measures the voiced part alone. It counted the
-  pre-roll and the trailing silence, which together are over a second, so the
-  floor could never fire and every click reached the transcriber.
-- The documentation site gained twelve pages and a check that fails the build
-  on a dead link, an unresolvable import, a public name with no prose, or a
-  sentence that reveals how the service is built.
+### The call
 
-### Fixed
+- `CallServer` answers the socket StandIn dials: the signed handshake and its
+  single-use replay guard, capacity and draining, the wire protocol, outbound
+  sequence numbers and the audio timeline, five bounds on a call nobody
+  closed, and idempotent teardown.
+- A handler implements up to seven callbacks and inherits from nothing. A
+  missing one is a no-op, and an exception from any of them ends that call
+  alone.
+- `cancel_playback()` is the only lever that un-sends audio the service
+  already holds, which is what makes a barge-in actually stop the bot.
 
-- A superseded turn no longer speaks its own failure over the turn that
-  replaced it.
-- A line handed to the voice lane after teardown is refused rather than
-  synthesized onto a call that has ended.
-- Parking an outbound message no longer raises out of a delivery that promises
-  not to raise. A failed park is reported as what it is: the call rang, and
-  nobody will hear the line.
+### Speech
+
+- `VoiceLane` runs segmentation, transcription, the agent and paced playback
+  as one turn, so an agent that only reads and writes text can hold a call.
+- `UtteranceSegmenter`, `PacedPlayback`, WAV decoding, resampling and a frame
+  aligner, for a plugin that wants the pieces rather than the assembly.
+- `StartupBuffer` and an echo guard for the speech-to-speech path, which has
+  its own turn-taking and its own two ways to go wrong.
+
+### Seeing, and being seen
+
+- The caller's camera and screen share, a vision budget, a recording-gated
+  keyframe history, and ambient vision that is off until a plugin turns it on.
+- Pictures, documents and web pages on the bot's tile, a slideshow, and the
+  model's choice of fullscreen or overlay.
+- Emotion cues and a viseme timeline estimated from the text and the audio
+  actually sent, covering Latin and Arabic, plus your own video on the tile.
+
+### Around the call
+
+- Call tools declared once and rendered into each provider's JSON, consulting
+  and durable background work, and a meeting recap with a Word document.
+- A chat lane dialled out from your worker, with attachments in and pictures
+  out, so nothing listens and no Bot Framework credential lives in your agent.
+- Outbound calling that speaks into a call already up before it rings anybody
+  a second time.
+- An install check that rings your own handler on loopback and reports what
+  worked, with no provider bill, no tunnel and no Microsoft tenant.
+
+### Plugins
+
+- ElevenLabs, Deepgram, Cartesia and an echo in both languages. LiveKit in
+  both. Hermes Agent in Python. OpenAI Realtime and OpenClaw in TypeScript.
 
 <!--
 Each release adds a section here, newest first:
