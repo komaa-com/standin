@@ -1,0 +1,391 @@
+# =============================================================================
+# The StandIn call wire protocol - SINGLE SOURCE OF TRUTH
+# =============================================================================
+# One WebSocket per active Microsoft Teams call. Peers exchange JSON text
+# frames, camelCase keys, discriminated on the "type" field. Unknown fields are
+# ignored and unknown message types degrade gracefully, so older and newer peers
+# interoperate and all evolution must be additive.
+#
+# Directions, from the point of view of code you write:
+#   service_to_worker  - StandIn sends, your worker receives
+#   worker_to_service  - your worker sends, StandIn receives
+#   both, bidirectional - travels in both directions
+#
+# This file is consumed by protocol/generate.py, which regenerates the two SDK
+# protocol modules:
+#   Python      libraries/python/standin/protocol.py
+#   TypeScript  libraries/typescript/src/protocol.ts
+# Never hand-edit those. Change this schema and regenerate; `make protocol-check`
+# fails the build if they drift.
+#
+# The StandIn service is the wire behaviour of record. Where a receiver is more
+# lenient than the wire requires, that leniency is recorded on the field rather
+# than changed, so an existing sender is never broken by a stricter reader.
+#
+# Field attributes:
+#   name       wire key (camelCase, exactly as serialized)
+#   type       string | int | long | object:<TypeName> | array:<TypeName>
+#   optional   may be omitted from the wire
+#   nullable   receiver also tolerates an explicit JSON null
+#   default    wire default the receiver assumes when the field is omitted
+#   enum       closed enum reference, validated by the strict receiver
+#   openEnum   documented well-known values, but any string is legal on the
+#              wire (receivers must not reject unknown values)
+#   pattern    regex the strict receiver enforces
+#   tsCheck    extra TypeScript validation: min1 | nonnegative | positive
+#   pyDefault  lenient fallback the Python receiver substitutes when the field
+#              is missing or blank
+#   doc        prose for the reader of this schema. The generator does not
+#              emit it, so it can be as long as the trap it records
+
+protocol:
+  name: standin-call
+  discriminator: type
+  doc: "Wire protocol between StandIn and your worker. One WebSocket per active Microsoft Teams call. JSON-encoded discriminated union on the 'type' field."
+
+constants:
+  - name: PCM_SAMPLE_RATE_HZ
+    value: 16000
+    tsName: MSTEAMS_PCM_SAMPLE_RATE_HZ
+    doc: "The wire format is PCM 16 kHz, 16-bit, mono in both directions. Both SDKs read the rate from here, so a resample is never introduced by a mismatched constant."
+
+enums:
+  RecordingStatus:
+    open: false
+    tsTypeName: MsteamsRecordingStatus
+    values: [active, inactive, unknown]
+    doc: "Microsoft Teams recording status for the call. Gate any persistence or processing of media-derived data on 'active': Microsoft's media access terms allow it only while the call reports that state."
+  CallDirection:
+    open: false
+    values: [inbound, outbound]
+    doc: "'inbound' (caller dialed the bot) or 'outbound' (the bot placed this call, e.g. via /api/calls). Receivers default to inbound when absent."
+  VideoFrameSource:
+    open: false
+    values: [camera, screenshare]
+    doc: "Which inbound video stream a sampled frame came from."
+  Emotion:
+    open: true
+    values: [neutral, happy, sad, surprised, thinking]
+    doc: "Avatar emotion hint. Open set: receivers treat unknown values as neutral, so senders may emit values an older receiver does not know."
+  DisplayImageMode:
+    open: true
+    values: [fullscreen, overlay]
+    doc: "'fullscreen' replaces the bot's video tile; 'overlay' renders a picture-in-picture inset over the live avatar. A receiver treats an unknown or absent value as fullscreen."
+  DisplayFrameMime:
+    open: true
+    values: [image/jpeg]
+    doc: "Encoding of a display.frame payload. Open set: senders send image/jpeg."
+
+types:
+  CallerInfo:
+    doc: "Microsoft Teams caller identity handed to your worker on session start. Every field is nullable because Microsoft Teams returns identities without one or more of them for guest and anonymous callers. Receivers coerce blank and whitespace strings to null so two anonymous callers never collide on an empty AAD id, which would let one caller read the other's conversation memory."
+    fields:
+      - name: aadId
+        type: string
+        optional: true
+        nullable: true
+        doc: "AAD object id of the caller, when known."
+      - name: displayName
+        type: string
+        optional: true
+        nullable: true
+        doc: "Human-readable display name, when known."
+      - name: tenantId
+        type: string
+        optional: true
+        nullable: true
+        doc: "AAD tenant id of the caller, when known."
+  SpeechMark:
+    doc: "One viseme mark: tMs milliseconds from the start of the utterance, visemeId a viseme in the Azure Speech numbering (0-21), which is the numbering the avatar expects."
+    fields:
+      - name: tMs
+        type: long
+        doc: "Time offset in ms, relative to the utterance/audio start."
+      - name: visemeId
+        type: int
+        doc: "Viseme id in the Azure Speech numbering, 0-21."
+
+messages:
+  # ---- service -> worker ------------------------------------------------------
+  - type: session.start
+    direction: service_to_worker
+    python: SessionStart
+    tsSchema: SessionStartSchema
+    doc: "StandIn -> your worker. Sent once after the WebSocket opens, carrying call metadata and caller identity. recordingStatus is the Microsoft Teams recording state at answer time; it is omitted when that state was unknown at answer time, and StandIn then reports it with recording.status."
+    fields:
+      - name: callId
+        type: string
+        tsCheck: min1
+        doc: "Graph call id; must match the HMAC-authenticated callId in the WebSocket URL path."
+      - name: threadId
+        type: string
+        pyDefault: ""
+        doc: "Microsoft Teams chat thread id for the call. EMPTY on a 1:1 call, which has no meeting thread. Receivers MUST accept the empty string: a min-length check here rejects every 1:1 session.start and takes the call down with it. Never substitute the call id, because chat addressed to a call id posts to a conversation that does not exist."
+      - name: caller
+        type: object:CallerInfo
+        doc: "Caller identity (best-effort; see CallerInfo)."
+      - name: recordingStatus
+        type: string
+        enum: RecordingStatus
+        optional: true
+        doc: "Microsoft Teams recording status at answer time; omitted (null) when that state was unknown then."
+      - name: direction
+        type: string
+        enum: CallDirection
+        optional: true
+        doc: "Lets your worker correlate a call it placed itself. Defaults to inbound when absent."
+      - name: tenantId
+        type: string
+        optional: true
+        doc: "The Microsoft tenant this call belongs to, so your worker can post chat for the right organisation while the call runs. Taken from the signed connection scope and never from a caller-supplied field, because a chat send is authorized with it. Absent when the connection serves a single tenant and there is nothing to disambiguate."
+
+  - type: session.end
+    # Travels both ways. StandIn -> your worker tells the agent the call is over. The other
+    # direction is the teardown NOTICE an agent sends first ("time-limit", "agent-disconnected",
+    # "agent-unavailable"). That notice is advisory, because the socket close that follows is what
+    # actually ends the call, but it carries the only answer to "why did that call end" that the
+    # other side cannot work out for itself.
+    direction: bidirectional
+    python: SessionEnd
+    tsSchema: SessionEndSchema
+    tsType: SessionEndMessage
+    doc: "Sent immediately before the socket closes. The reason is opaque text, for example 'call-ended' or 'transport-failure'."
+    fields:
+      - name: reason
+        type: string
+        pyDefault: ""
+        doc: "Opaque close reason text."
+
+  - type: recording.status
+    direction: service_to_worker
+    python: RecordingStatus
+    tsSchema: RecordingStatusMessageSchema
+    doc: "StandIn -> your worker. Reports the Microsoft Teams recording status for the call, and reports it again whenever it changes. Gate any persistence or processing of media-derived data on 'active'."
+    fields:
+      - name: status
+        type: string
+        enum: RecordingStatus
+        doc: "Current Microsoft Teams recording status."
+
+  - type: audio.frame
+    direction: both
+    python: AudioFrame
+    tsSchema: AudioFrameSchema
+    tsType: AudioFrameMessage
+    doc: "Travels both ways. The sender increments seq and the receiver may use it to spot drops. payloadBase64 is base64-encoded PCM (16 kHz, 16-bit, mono, little-endian), usually one 20 ms frame: 640 raw bytes, about 856 base64 characters."
+    fields:
+      - name: seq
+        type: long
+        tsCheck: nonnegative
+        doc: "Monotonic frame sequence number (per direction)."
+      - name: timestampMs
+        type: long
+        tsCheck: nonnegative
+        doc: "Frame timestamp in ms on the sender's audio timeline."
+      - name: payloadBase64
+        type: string
+        doc: "Base64-encoded PCM16K bytes."
+      - name: speakerName
+        type: string
+        optional: true
+        doc: "StandIn -> your worker only. The active speaker's display name when unmixed audio is on, so a transcript can carry per-person attribution. Additive: absent on the mixed path."
+
+  - type: video.frame
+    direction: service_to_worker
+    python: VideoFrame
+    tsSchema: VideoFrameSchema
+    doc: "StandIn -> your worker. A sampled inbound video frame, from the caller camera or a screen share, as a base64 JPEG. Sent sparsely and best-effort: a frame is dropped rather than queued when the socket is busy. Keep only the latest frame per source and feed it to a vision model on demand."
+    fields:
+      - name: source
+        type: string
+        enum: VideoFrameSource
+        doc: "'camera' | 'screenshare'."
+      - name: ts
+        type: long
+        tsCheck: nonnegative
+        doc: "Capture timestamp in ms."
+      - name: width
+        type: int
+        tsCheck: positive
+        doc: "Frame width in pixels, already downscaled before sending."
+      - name: height
+        type: int
+        tsCheck: positive
+        doc: "Frame height in pixels."
+      - name: mime
+        type: string
+        tsCheck: min1
+        pyDefault: image/jpeg
+        doc: "Image MIME type; the sender sends 'image/jpeg'."
+      - name: dataBase64
+        type: string
+        tsCheck: min1
+        doc: "Base64-encoded image bytes."
+      - name: participantId
+        type: string
+        optional: true
+        tsCheck: min1
+        doc: "Who this frame belongs to, so a vision model can reason about 'who is saying what' in a group call. For 'camera' the currently-subscribed speaker; for 'screenshare' the sharer. Best-effort: absent for anonymous/guest participants or when identity is unavailable."
+      - name: participantName
+        type: string
+        optional: true
+        tsCheck: min1
+        doc: "Display name matching participantId. Best-effort."
+
+  - type: participants
+    direction: service_to_worker
+    python: Participants
+    tsSchema: ParticipantsSchema
+    doc: "StandIn -> your worker. The number of human participants on the call, excluding the bot, sent on join and whenever the roster changes. It lets an agent tell a 1:1 call (count <= 1) from a group call (count >= 2), so it can stay quiet in a group until it is addressed."
+    fields:
+      - name: count
+        type: int
+        tsCheck: nonnegative
+        doc: "Human participant count, excluding the bot."
+
+  - type: dtmf
+    direction: service_to_worker
+    python: Dtmf
+    tsSchema: DtmfSchema
+    doc: "StandIn -> your worker. A DTMF key the caller pressed during the call, detected as an in-band tone. The SDK surfaces it to your handler so an agent can drive IVR-style flows ('press 1 to...')."
+    fields:
+      - name: digit
+        type: string
+        pattern: "^[0-9*#]$"
+        doc: "A single character: '0'-'9', '*', or '#'."
+
+  - type: ping
+    direction: service_to_worker
+    python: Ping
+    tsSchema: PingSchema
+    doc: "StandIn -> your worker heartbeat, every 30 s, which keeps a proxy or NAT idle timeout from half-opening the socket. Your worker replies with pong."
+    fields:
+      - name: ts
+        type: long
+        tsCheck: nonnegative
+        doc: "Sender's unix epoch ms."
+
+  - type: assistant.say
+    direction: service_to_worker
+    python: AssistantSay
+    tsSchema: AssistantSaySchema
+    doc: "StandIn -> your worker. Ask the agent to speak the given text in its OWN voice just before the call is torn down, so a minute limit ends with a short goodbye instead of a bare mid-sentence hangup. The SDK injects the text into a realtime session, or speaks it down the existing TTS path when one is in use. Additive and best-effort: a worker that implements neither ignores it."
+    fields:
+      - name: text
+        type: string
+        tsCheck: min1
+        doc: "The exact utterance the agent should speak (a short goodbye)."
+
+  # ---- worker -> service ------------------------------------------------------
+  - type: assistant.cancel
+    direction: worker_to_service
+    python: AssistantCancel
+    tsType: AssistantCancelMessage
+    doc: "Your worker -> StandIn. Cancel the current TTS turn, which is how a barge-in is expressed. StandIn flushes playback queued from audio it received before the cancel."
+    fields:
+      - name: turnId
+        type: long
+        doc: "The assistant turn being cancelled (sender-scoped counter)."
+
+  - type: expression
+    direction: worker_to_service
+    python: Expression
+    tsType: ExpressionMessage
+    doc: "Your worker -> StandIn. Hint the emotion the avatar should express on the bot's video tile. Additive and best-effort: a receiver that does not implement it ignores it, and an unknown value falls back to neutral. It affects the video tile only, never the audio."
+    fields:
+      - name: emotion
+        type: string
+        openEnum: Emotion
+        doc: "Emotion tag; see Emotion enum for well-known values."
+
+  - type: speech.marks
+    direction: worker_to_service
+    python: SpeechMarks
+    tsType: SpeechMarksMessage
+    doc: "Your worker -> StandIn. The viseme timeline for one TTS utterance: each mark is a (tMs, visemeId) pair on that utterance's audio timeline, and together they drive the avatar lip-sync. Additive and best-effort: a receiver that does not implement it ignores the message."
+    fields:
+      - name: ts
+        type: long
+        doc: "Reserved timeline anchor; senders currently send 0."
+      - name: marks
+        type: array:SpeechMark
+        doc: "Viseme marks, ascending tMs."
+
+  - type: display.image
+    direction: worker_to_service
+    python: DisplayImage
+    tsType: DisplayImageMessage
+    doc: "Your worker -> StandIn. Show the caller an image on the bot's outbound video tile for a few seconds, then return to the avatar. Additive and best-effort: a receiver that does not implement it ignores it."
+    fields:
+      - name: dataBase64
+        type: string
+        doc: "Image bytes (JPEG/PNG per mime), base64-encoded."
+      - name: mime
+        type: string
+        doc: "'image/jpeg' or 'image/png'."
+      - name: durationMs
+        type: int
+        optional: true
+        nullable: true
+        doc: "How long to show the image. StandIn applies its own default when this is omitted, null or <= 0."
+      - name: mode
+        type: string
+        openEnum: DisplayImageMode
+        optional: true
+        nullable: true
+        doc: "'fullscreen' replaces the tile and is the default; 'overlay' draws a picture-in-picture inset."
+      - name: ts
+        type: long
+        optional: true
+        default: 0
+        doc: "Reserved timeline anchor. Both SDKs send 0, and a receiver treats an absent field as 0."
+      - name: caption
+        type: string
+        optional: true
+        nullable: true
+        doc: "Optional short label drawn along the bottom of the image."
+
+  - type: display.frame
+    direction: worker_to_service
+    python: DisplayFrame
+    tsType: DisplayFrameMessage
+    # published: false keeps a message out of the generated public wire-surface
+    # table while its shape is still settling. Messages default to published.
+    published: false
+    doc: "Your worker -> StandIn. One frame of a continuous avatar-video stream onto the bot tile, JPEG-compressed. Latest wins: only the newest frame matters, so a sender MUST drop frames under backpressure rather than buffer them, exactly as it does for hot-path audio. There is no lifecycle handshake: the first frames start the stream and silence ends it. Additive and best-effort, and the shape of this message may still change, so a receiver that does not implement it ignores it."
+    fields:
+      - name: seq
+        type: long
+        tsCheck: nonnegative
+        doc: "Monotonic frame sequence number; out-of-order and duplicate frames are dropped."
+      - name: ts
+        type: long
+        tsCheck: nonnegative
+        doc: "Capture timestamp in ms on the SENDER's media timeline - the same timeline the sender stamps on its outbound audio.frame messages, so the video and audio streams carry one shared clock. Not a scheduling deadline."
+      - name: mime
+        type: string
+        openEnum: DisplayFrameMime
+        doc: "Frame encoding; senders send 'image/jpeg'."
+      - name: dataBase64
+        type: string
+        doc: "Base64-encoded image bytes. Senders SHOULD keep frames small (target <= 40 KB raw per frame) and MUST drop rather than buffer under backpressure."
+      - name: width
+        type: int
+        optional: true
+        nullable: true
+        doc: "Source pixel width (informational)."
+      - name: height
+        type: int
+        optional: true
+        nullable: true
+        doc: "Source pixel height (informational)."
+
+  - type: pong
+    direction: worker_to_service
+    python: Pong
+    tsType: PongMessage
+    doc: "Your worker -> StandIn heartbeat response, echoing the ping timestamp."
+    fields:
+      - name: ts
+        type: long
+        doc: "Echoed ping timestamp (unix epoch ms)."

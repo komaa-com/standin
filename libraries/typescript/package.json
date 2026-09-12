@@ -1,0 +1,129 @@
+{
+  "name": "@komaa/standin-sdk",
+  "version": "0.1.0",
+  "description": "Put your AI agent into a Microsoft Teams call. The StandIn SDK and every framework plugin, in one package.",
+  "license": "MIT",
+  "author": "Komaa DigiTech <support@komaa.com>",
+  "homepage": "https://standin.komaa.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/komaa-com/standin.git",
+    "directory": "libraries/typescript"
+  },
+  "bugs": "https://github.com/komaa-com/standin/issues",
+  "keywords": [
+    "ai",
+    "agents",
+    "voice",
+    "realtime",
+    "audio",
+    "speech-to-speech",
+    "microsoft-teams",
+    "livekit",
+    "elevenlabs",
+    "deepgram",
+    "cartesia",
+    "openai",
+    "openclaw",
+    "standin"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./cartesia": {
+      "types": "./dist/plugins/cartesia/index.d.ts",
+      "default": "./dist/plugins/cartesia/index.js"
+    },
+    "./deepgram": {
+      "types": "./dist/plugins/deepgram/index.d.ts",
+      "default": "./dist/plugins/deepgram/index.js"
+    },
+    "./echo": {
+      "types": "./dist/plugins/echo/index.d.ts",
+      "default": "./dist/plugins/echo/index.js"
+    },
+    "./elevenlabs": {
+      "types": "./dist/plugins/elevenlabs/index.d.ts",
+      "default": "./dist/plugins/elevenlabs/index.js"
+    },
+    "./livekit": {
+      "types": "./dist/plugins/livekit/index.d.ts",
+      "default": "./dist/plugins/livekit/index.js"
+    },
+    "./openai": {
+      "types": "./dist/plugins/openai/index.d.ts",
+      "default": "./dist/plugins/openai/index.js"
+    },
+    "./openclaw": {
+      "types": "./dist/plugins/openclaw/index.d.ts",
+      "default": "./dist/plugins/openclaw/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "//exports": "The core is the bare specifier and imports NOTHING from plugins/, so `import { CallServer } from \"@komaa/standin-sdk\"` works with no framework installed. Each plugin is its own subpath, reached only by a caller that already has that framework. OpenClaw additionally loads its entry by DIRECTORY path, not by specifier - see scripts/emit-openclaw-plugin-dir.mjs.",
+  "bin": {
+    "standin-cartesia": "./dist/plugins/cartesia/cli.js",
+    "standin-deepgram": "./dist/plugins/deepgram/cli.js",
+    "standin-echo": "./dist/plugins/echo/cli.js",
+    "standin-elevenlabs": "./dist/plugins/elevenlabs/cli.js",
+    "standin-livekit": "./dist/plugins/livekit/cli.js",
+    "standin-openai": "./dist/plugins/openai/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "//engines": "The floor is the CORE's floor, not the highest floor any plugin needs. OpenClaw's gateway wants Node 22.19+, but that requirement travels with the openclaw peer dependency, so a Node 20 user of the core is not warned about a framework they never installed.",
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/emit-openclaw-plugin-dir.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "npm run build && npm run typecheck && npm run test",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "peerDependencies": {
+    "@livekit/rtc-node": ">=0.13.0",
+    "livekit-server-sdk": ">=2.9.0",
+    "openclaw": ">=2026.6.10",
+    "sharp": ">=0.33.0"
+  },
+  "peerDependenciesMeta": {
+    "@livekit/rtc-node": {
+      "optional": true
+    },
+    "livekit-server-sdk": {
+      "optional": true
+    },
+    "openclaw": {
+      "optional": true
+    },
+    "sharp": {
+      "optional": true
+    }
+  },
+  "//peerDependencies": "Every peer here is OPTIONAL, and that is what lets one package ship every plugin. The core and the four provider plugins need nothing but ws, so most installs take none of these. openclaw runs the plugin INSIDE its gateway process and consumes the host's session and logger. LiveKit is a room you join, which means running its client. sharp encodes avatar video frames for the optional tile relay. The devDependencies below pin the SAME versions from the registry so tsc resolves real typings on any machine - never a link: to a sibling checkout, which would put one developer's disk path into the committed lockfile.",
+  "devDependencies": {
+    "@livekit/rtc-node": "^0.13.0",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "livekit-server-sdk": "^2.9.0",
+    "openclaw": "2026.6.10",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "packageManager": "pnpm@11.20.0",
+  "//pnpm": "overrides and allowBuilds live in pnpm-workspace.yaml, not here: pnpm 11 stopped reading the `pnpm` field from package.json and ignores it with a warning. That file has no `packages:` list - there is no workspace, only settings."
+}

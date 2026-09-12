@@ -1,0 +1,1596 @@
+{
+  "$comment": [
+    "Shared conformance vectors for the StandIn call wire protocol.",
+    "",
+    "BOTH SDKs run this file. libraries/python/tests/test_conformance.py and",
+    "libraries/typescript/src/conformance.test.ts read it and assert the same",
+    "expectations, so 'the Python and TypeScript SDKs are at parity' is a thing",
+    "CI proves rather than a thing a README claims.",
+    "",
+    "The protocol used to live as a copy beside each plugin, with a drift",
+    "check over the copies, and they drifted anyway. Here the schema is one",
+    "file and the behaviour is one set of vectors.",
+    "",
+    "Adding a vector is the right way to fix a parity bug: write the case here",
+    "first, watch one language fail, then fix that language."
+  ],
+  "version": 1,
+  "hmac": {
+    "$comment": "HMAC-SHA256(secret, '{timestampMs}.{id}'), lowercase hex. A signature produced by either SDK must verify in the other.",
+    "sign": [
+      {
+        "name": "canonical call handshake",
+        "secret": "test-secret-never-a-real-one",
+        "timestampMs": "1735689600000",
+        "id": "call-abc123",
+        "expected": "6c1ebfce2c9e8e0a7aac25611b20a1a0bf391c9c2d332c105ff314d7de92b8a5"
+      }
+    ],
+    "verifyRejects": [
+      {
+        "name": "empty secret fails closed",
+        "secret": "",
+        "timestamp": "1735689600000",
+        "id": "call-1",
+        "signature": "deadbeef"
+      },
+      {
+        "name": "missing timestamp fails closed",
+        "secret": "s",
+        "timestamp": null,
+        "id": "call-1",
+        "signature": "deadbeef"
+      },
+      {
+        "name": "missing signature fails closed",
+        "secret": "s",
+        "timestamp": "1735689600000",
+        "id": "call-1",
+        "signature": null
+      },
+      {
+        "name": "non-numeric timestamp is not a timestamp",
+        "secret": "s",
+        "timestamp": "not-a-number",
+        "id": "call-1",
+        "signature": "deadbeef"
+      },
+      {
+        "name": "empty timestamp string",
+        "secret": "s",
+        "timestamp": "",
+        "id": "call-1",
+        "signature": "deadbeef"
+      },
+      {
+        "name": "hex timestamp: Number() would accept 0x10, int() would not",
+        "secret": "s",
+        "timestamp": "0x10",
+        "id": "call-1",
+        "signature": "deadbeef"
+      },
+      {
+        "name": "exponent timestamp: Number() would accept 1e12, int() would not",
+        "secret": "s",
+        "timestamp": "1e12",
+        "id": "call-1",
+        "signature": "deadbeef"
+      },
+      {
+        "name": "non-ascii signature must 401, never crash",
+        "secret": "s",
+        "timestamp": "1735689600000",
+        "id": "call-1",
+        "signature": "ünicode"
+      },
+      {
+        "name": "short signature must 401, never throw on length mismatch",
+        "secret": "s",
+        "timestamp": "1735689600000",
+        "id": "call-1",
+        "signature": "ab"
+      }
+    ]
+  },
+  "sessionStart": {
+    "$comment": "parseSessionStart. Blank and whitespace-only strings read as absent, so two anonymous callers never collide on an empty AAD id and share memory.",
+    "accepts": [
+      {
+        "name": "full identity",
+        "input": {
+          "type": "session.start",
+          "callId": "call-1",
+          "threadId": "19:meeting@thread.v2",
+          "direction": "outbound",
+          "recordingStatus": "active",
+          "tenantId": "tenant-signed",
+          "caller": {
+            "aadId": "aad-1",
+            "displayName": "Alaa",
+            "tenantId": "tenant-1"
+          }
+        },
+        "expected": {
+          "callId": "call-1",
+          "threadId": "19:meeting@thread.v2",
+          "direction": "outbound",
+          "recordingStatus": "active",
+          "tenantId": "tenant-signed",
+          "caller": {
+            "aadId": "aad-1",
+            "displayName": "Alaa",
+            "tenantId": "tenant-1"
+          }
+        }
+      },
+      {
+        "name": "1:1 call has no meeting thread",
+        "input": {
+          "type": "session.start",
+          "callId": "call-2"
+        },
+        "expected": {
+          "callId": "call-2",
+          "threadId": "",
+          "direction": "inbound",
+          "recordingStatus": null,
+          "tenantId": null,
+          "caller": {
+            "aadId": null,
+            "displayName": null,
+            "tenantId": null
+          }
+        }
+      },
+      {
+        "name": "blank and whitespace caller fields read as absent",
+        "input": {
+          "type": "session.start",
+          "callId": "call-3",
+          "threadId": "   ",
+          "caller": {
+            "aadId": "",
+            "displayName": "   ",
+            "tenantId": "\t"
+          }
+        },
+        "expected": {
+          "callId": "call-3",
+          "threadId": "",
+          "direction": "inbound",
+          "recordingStatus": null,
+          "tenantId": null,
+          "caller": {
+            "aadId": null,
+            "displayName": null,
+            "tenantId": null
+          }
+        }
+      },
+      {
+        "name": "unknown direction falls back to inbound, never rejected",
+        "input": {
+          "type": "session.start",
+          "callId": "call-4",
+          "direction": "sideways"
+        },
+        "expected": {
+          "callId": "call-4",
+          "threadId": "",
+          "direction": "inbound",
+          "recordingStatus": null,
+          "tenantId": null,
+          "caller": {
+            "aadId": null,
+            "displayName": null,
+            "tenantId": null
+          }
+        }
+      },
+      {
+        "name": "non-object caller is tolerated",
+        "input": {
+          "type": "session.start",
+          "callId": "call-5",
+          "caller": "nope"
+        },
+        "expected": {
+          "callId": "call-5",
+          "threadId": "",
+          "direction": "inbound",
+          "recordingStatus": null,
+          "tenantId": null,
+          "caller": {
+            "aadId": null,
+            "displayName": null,
+            "tenantId": null
+          }
+        }
+      },
+      {
+        "name": "values are trimmed",
+        "input": {
+          "type": "session.start",
+          "callId": "  call-6  ",
+          "caller": {
+            "displayName": "  Alaa  "
+          }
+        },
+        "expected": {
+          "callId": "call-6",
+          "threadId": "",
+          "direction": "inbound",
+          "recordingStatus": null,
+          "tenantId": null,
+          "caller": {
+            "aadId": null,
+            "displayName": "Alaa",
+            "tenantId": null
+          }
+        }
+      }
+    ],
+    "rejects": [
+      {
+        "name": "no callId",
+        "input": {
+          "type": "session.start"
+        }
+      },
+      {
+        "name": "blank callId",
+        "input": {
+          "type": "session.start",
+          "callId": "   "
+        }
+      },
+      {
+        "name": "non-string callId",
+        "input": {
+          "type": "session.start",
+          "callId": 7
+        }
+      }
+    ]
+  },
+  "parseMessage": {
+    "$comment": "Malformed input is DROPPED, never raised: this runs on the receive path of a live call.",
+    "dropped": [
+      {
+        "name": "not json",
+        "input": "not json at all"
+      },
+      {
+        "name": "json array",
+        "input": "[1,2,3]"
+      },
+      {
+        "name": "json string",
+        "input": "\"hello\""
+      },
+      {
+        "name": "json number",
+        "input": "42"
+      },
+      {
+        "name": "json null",
+        "input": "null"
+      },
+      {
+        "name": "object without type",
+        "input": "{\"callId\":\"x\"}"
+      },
+      {
+        "name": "type is not a string",
+        "input": "{\"type\":7}"
+      },
+      {
+        "name": "NaN is not JSON",
+        "input": "{\"type\":\"ping\",\"ts\":NaN}"
+      },
+      {
+        "name": "Infinity is not JSON",
+        "input": "{\"type\":\"ping\",\"ts\":Infinity}"
+      }
+    ],
+    "accepted": [
+      {
+        "name": "minimal frame",
+        "input": "{\"type\":\"ping\"}",
+        "expectedType": "ping"
+      },
+      {
+        "name": "unknown type is accepted here and ignored by the frame loop",
+        "input": "{\"type\":\"a.type.from.the.future\"}",
+        "expectedType": "a.type.from.the.future"
+      }
+    ],
+    "bytesDropped": [
+      {
+        "name": "invalid UTF-8",
+        "inputBase64": "eyJ0eXBlIjoicGluZyIsImxhYmVsIjoi/yJ9"
+      },
+      {
+        "name": "UTF-16 JSON",
+        "inputBase64": "//57ACIAdAB5AHAAZQAiADoAIgBwAGkAbgBnACIAfQA="
+      },
+      {
+        "name": "UTF-8 BOM",
+        "inputBase64": "77u/eyJ0eXBlIjoicGluZyJ9"
+      }
+    ]
+  },
+  "decodePcm": {
+    "$comment": "PCM16 is 2 bytes per sample. An odd length means a truncated frame; truncating it silently would shift every following sample by a byte and turn the rest of the utterance into noise.",
+    "accepts": [
+      {
+        "name": "one sample",
+        "payloadBase64": "AQI=",
+        "expectedBytes": 2
+      },
+      {
+        "name": "160 samples (10ms)",
+        "payloadBase64": "AQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQIBAgECAQI=",
+        "expectedBytes": 320
+      },
+      {
+        "name": "three complete samples need no padding",
+        "payloadBase64": "AQIDBAUG",
+        "expectedBytes": 6
+      }
+    ],
+    "rejects": [
+      {
+        "name": "empty payload",
+        "payloadBase64": ""
+      },
+      {
+        "name": "missing payload",
+        "payloadBase64": null
+      },
+      {
+        "name": "non-string payload",
+        "payloadBase64": 7
+      },
+      {
+        "name": "odd byte count",
+        "payloadBase64": "AQID"
+      },
+      {
+        "name": "single byte",
+        "payloadBase64": "AQ=="
+      },
+      {
+        "name": "not base64",
+        "payloadBase64": "!!!not-base64!!!"
+      },
+      {
+        "name": "required padding is missing",
+        "payloadBase64": "AQI"
+      },
+      {
+        "name": "excess padding is rejected",
+        "payloadBase64": "AQI=="
+      },
+      {
+        "name": "nonzero padding bits are rejected",
+        "payloadBase64": "AQJ="
+      },
+      {
+        "name": "trailing whitespace is rejected",
+        "payloadBase64": "AQI=\n"
+      },
+      {
+        "name": "URL-safe alphabet is rejected",
+        "payloadBase64": "__8="
+      },
+      {
+        "name": "embedded padding is rejected",
+        "payloadBase64": "AQ=I"
+      }
+    ]
+  },
+  "audioTimeline": {
+    "$comment": "The server owns seq and timestampMs. Integer division at every step: (bytes // 2) * 1000 // 16000. A float in either SDK drifts the two timelines apart over a long call.",
+    "sampleRateHz": 16000,
+    "steps": [
+      {
+        "pcmBytes": 320,
+        "expectedSeq": 1,
+        "expectedTimestampMs": 0
+      },
+      {
+        "pcmBytes": 320,
+        "expectedSeq": 2,
+        "expectedTimestampMs": 10
+      },
+      {
+        "pcmBytes": 320,
+        "expectedSeq": 3,
+        "expectedTimestampMs": 20
+      },
+      {
+        "pcmBytes": 640,
+        "expectedSeq": 4,
+        "expectedTimestampMs": 30
+      },
+      {
+        "pcmBytes": 320,
+        "expectedSeq": 5,
+        "expectedTimestampMs": 50
+      },
+      {
+        "$comment": "100 bytes = 50 samples = 3.125ms, truncated to 3",
+        "pcmBytes": 100,
+        "expectedSeq": 6,
+        "expectedTimestampMs": 60
+      },
+      {
+        "pcmBytes": 320,
+        "expectedSeq": 7,
+        "expectedTimestampMs": 63
+      }
+    ]
+  },
+  "contextSentences": {
+    "$comment": "The exact strings an agent sees. Both SDKs must emit these byte-for-byte, or an agent behaves differently depending on which language its plugin happens to be written in.",
+    "participants": [
+      {
+        "count": 0,
+        "expected": "This is a 1:1 call with a single human caller."
+      },
+      {
+        "count": 1,
+        "expected": "This is a 1:1 call with a single human caller."
+      },
+      {
+        "count": 2,
+        "expected": "There are 2 human participants on this call. Stay quiet unless directly addressed."
+      },
+      {
+        "count": 12,
+        "expected": "There are 12 human participants on this call. Stay quiet unless directly addressed."
+      }
+    ],
+    "dtmf": [
+      {
+        "digit": "7",
+        "expected": "The caller pressed the \"7\" key on their keypad."
+      },
+      {
+        "digit": "#",
+        "expected": "The caller pressed the \"#\" key on their keypad."
+      },
+      {
+        "digit": "*",
+        "expected": "The caller pressed the \"*\" key on their keypad."
+      }
+    ],
+    "recording": [
+      {
+        "status": "active",
+        "expected": "The Microsoft Teams call recording is now ACTIVE."
+      },
+      {
+        "status": "inactive",
+        "expected": "The Microsoft Teams call recording is not active."
+      },
+      {
+        "status": "unknown",
+        "expected": "The Microsoft Teams call recording is not active."
+      }
+    ]
+  },
+  "outboundFrames": {
+    "$comment": "Exact JSON both SDKs put on the wire. Key ORDER is not asserted; the parsed object is.",
+    "pong": [
+      {
+        "input": 12345,
+        "expected": {
+          "type": "pong",
+          "ts": 12345
+        }
+      },
+      {
+        "$comment": "a non-integer ts is normalised to 0 rather than echoed",
+        "input": "nope",
+        "expected": {
+          "type": "pong",
+          "ts": 0
+        }
+      },
+      {
+        "input": null,
+        "expected": {
+          "type": "pong",
+          "ts": 0
+        }
+      },
+      {
+        "name": "boolean is not a timestamp",
+        "input": true,
+        "expected": {
+          "type": "pong",
+          "ts": 0
+        }
+      },
+      {
+        "name": "fractional timestamp is rejected",
+        "input": 1.5,
+        "expected": {
+          "type": "pong",
+          "ts": 0
+        }
+      },
+      {
+        "name": "integral JSON number is a timestamp",
+        "input": 12345.0,
+        "expected": {
+          "type": "pong",
+          "ts": 12345
+        }
+      },
+      {
+        "name": "safe integer boundary is preserved",
+        "input": 9007199254740991,
+        "expected": {
+          "type": "pong",
+          "ts": 9007199254740991
+        }
+      },
+      {
+        "name": "unsafe integer is rejected",
+        "input": 9007199254740992,
+        "expected": {
+          "type": "pong",
+          "ts": 0
+        }
+      },
+      {
+        "name": "negative safe integer is preserved",
+        "input": -12345,
+        "expected": {
+          "type": "pong",
+          "ts": -12345
+        }
+      },
+      {
+        "name": "unsafe negative integer is rejected",
+        "input": -9007199254740992,
+        "expected": {
+          "type": "pong",
+          "ts": 0
+        }
+      }
+    ],
+    "sessionEnd": [
+      {
+        "input": "caller-hung-up",
+        "expected": {
+          "type": "session.end",
+          "reason": "caller-hung-up"
+        }
+      }
+    ],
+    "assistantCancel": [
+      {
+        "input": 4,
+        "expected": {
+          "type": "assistant.cancel",
+          "turnId": 4
+        }
+      }
+    ]
+  },
+  "audio": {
+    "$comment": [
+      "Audio helpers. The wire is 16 kHz; realtime models are 24 kHz; nothing chunks on the",
+      "wire's 640-byte frame. Both SDKs must resample and align IDENTICALLY, or the same",
+      "agent sounds different depending on which language its plugin happens to be in.",
+      "Expected values are produced by the Python implementation and asserted by both."
+    ],
+    "resample": [
+      {
+        "name": "16k -> 24k, one 20ms frame",
+        "srcHz": 16000,
+        "dstHz": 24000,
+        "inputBase64": "AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wQAAB37WPbR8aLt6Om45ijkSOIj4cDgI+FI4ijkuObo6aLt0fFY9h37AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wQAAB37WPbR8aLt6Om45ijkSOIj4cDgI+FI4ijkuObo6aLt0fFY9h37AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+w==",
+        "expectedBase64": "AABCA3oGqAmsDJMPXhLZFCgXSBn9GngcuB17Hv4eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QLhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QPhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QPhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QPhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QPhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QPhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QPhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QPhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+R37",
+        "expectedBytes": 960
+      },
+      {
+        "name": "24k -> 16k, one realtime chunk",
+        "srcHz": 24000,
+        "dstHz": 16000,
+        "inputBase64": "AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wQAAB37WPbR8aLt6Om45ijkSOIj4cDgI+FI4ijkuObo6aLt0fFY9h37AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wQAAB37WPbR8aLt6Om45ijkSOIj4cDgI+FI4ijkuObo6aLt0fFY9h37AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wQAAB37WPbR8aLt6Om45ijkSOIj4cDgI+FI4ijkuObo6aLt0fFY9h37AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wQAAB37WPbR8aLt6Om45ijkSOIj4cDgI+FI4ijkuObo6aLt0fFY9h37",
+        "expectedBase64": "AABFBy8OOxRIGcgc3R4OH7gdkBoYFkYQqAlxAh37FfSi7VDoKOS24cDgtuEo5FDoou0V9B37cQKoCUYQGBaQGrgdDh/dHsgcSBk7FC8ORQcAALv40fHF67jmOOMj4fLgSOJw5ejpuu9Y9o/94wTrC14SsBfYG0oeQB9KHtgbsBdeEusL4wSP/Vj2uu/o6XDlSOLy4CPhOOO45sXr0fG7+AAARQcvDjsUSBnIHN0eDh+4HZAaGBZGEKgJcQId+xX0ou1Q6CjktuHA4LbhKORQ6KLtFfQd+3ECqAlGEBgWkBq4HQ4f3R7IHEgZOxQvDkUHAAC7+NHxxeu45jjjI+Hy4EjicOXo6brvWPaP/eME6wteErAX2BtKHkAfSh7YG7AXXhLrC+MEj/1Y9rrv6Olw5Uji8uAj4TjjuObF69Hxu/gAAEUHLw47FEgZyBzdHg4fuB2QGhgWRhCoCXECHfsV9KLtUOgo5LbhwOC24SjkUOii7RX0HftxAqgJRhAYFpAauB0OH90eyBxIGTsULw5FBwAAu/jR8cXruOY44yPh8uBI4nDl6Om671j2j/3jBOsLXhKwF9gbSh5AH0oe2BuwF14S6wvjBI/9WPa67+jpcOVI4vLgI+E447jmxevR8bv4AABFBy8OOxRIGcgc3R4OH7gdkBoYFkYQqAlxAh37FfSi7VDoKOS24cDgtuEo5FDoou0V9B37cQKoCUYQGBaQGrgdDh/dHsgcSBk7FC8ORQcAALv40fHF67jmOOMj4fLgSOJw5ejpuu9Y9o/94wTrC14SsBfYG0oeQB9KHtgbsBdeEusL4wSP/Vj2uu/o6XDlSOLy4CPhOOO45sXr0fG7+A==",
+        "expectedBytes": 640
+      },
+      {
+        "name": "same rate is a passthrough",
+        "srcHz": 16000,
+        "dstHz": 16000,
+        "inputBase64": "AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wQAAB37WPbR8aLt6Om45ijkSOIj4cDgI+FI4ijkuObo6aLt0fFY9h37AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2Hfs=",
+        "expectedBase64": "AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wQAAB37WPbR8aLt6Om45ijkSOIj4cDgI+FI4ijkuObo6aLt0fFY9h37AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2Hfs=",
+        "expectedBytes": 320
+      },
+      {
+        "name": "odd trailing byte is dropped, never raises",
+        "srcHz": 16000,
+        "dstHz": 24000,
+        "inputBase64": "AADjBKgJLw5eEhgWSBnYG7gd3R5AH90euB3YG0gZGBZeEi8OqAnjBAAAHftY9tHxou3o6bjmKORI4iPhwOAj4UjiKOS45ujpou3R8Vj2HfsAAOMEqAkvDl4SGBZIGdgbuB3dHkAf3R64HdgbSBkYFl4SLw6oCeMEAAAd+1j20fGi7ejpuOYo5EjiI+HA4CPhSOIo5Ljm6Omi7dHxWPYd+wAA4wSoCS8OXhIYFkgZ2Bu4Hd0eQB/dHrgd2BtIGRgWXhIvDqgJ4wR/",
+        "expectedBase64": "AABCA3oGqAmsDJMPXhLZFCgXSBn9GngcuB17Hv4eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QLhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BkIDAAC//If5WPZU823wou0n69nouOYD5YnjSOKF4QPhwOAC4YXhSOKI4wPluObY6Cbrou1s8FTzWPaG+b78AABBA3kGqAmsDJMPXhLZFCcXSBn9GnccuB17Hv0eQB/+HnseuB14HP0aSBkoF9oUXhKUD6wMqAl6BuME",
+        "expectedBytes": 300
+      },
+      {
+        "name": "single sample",
+        "srcHz": 16000,
+        "dstHz": 24000,
+        "inputBase64": "0gQ=",
+        "expectedBase64": "0gTSBA==",
+        "expectedBytes": 4
+      },
+      {
+        "name": "empty",
+        "srcHz": 16000,
+        "dstHz": 24000,
+        "inputBase64": "",
+        "expectedBase64": "",
+        "expectedBytes": 0
+      },
+      {
+        "name": "negative samples interpolate correctly",
+        "srcHz": 16000,
+        "dstHz": 24000,
+        "inputBase64": "0Irw2BAnMHU=",
+        "expectedBase64": "0IrmvvvyECclWzB1",
+        "expectedBytes": 12
+      }
+    ],
+    "frameAligner": [
+      {
+        "name": "exact frame passes straight through",
+        "frameBytes": 640,
+        "pushes": [
+          {
+            "inputBytes": 640,
+            "framesOut": 1,
+            "pendingAfter": 0
+          }
+        ],
+        "flushBytes": null
+      },
+      {
+        "name": "short buffer is held back entirely",
+        "frameBytes": 640,
+        "pushes": [
+          {
+            "inputBytes": 100,
+            "framesOut": 0,
+            "pendingAfter": 100
+          }
+        ],
+        "flushBytes": 640
+      },
+      {
+        "name": "resampled 24k chunk splits with a residual",
+        "frameBytes": 640,
+        "pushes": [
+          {
+            "inputBytes": 960,
+            "framesOut": 1,
+            "pendingAfter": 320
+          }
+        ],
+        "flushBytes": 640
+      },
+      {
+        "name": "residual accumulates across pushes",
+        "frameBytes": 640,
+        "pushes": [
+          {
+            "inputBytes": 500,
+            "framesOut": 0,
+            "pendingAfter": 500
+          },
+          {
+            "inputBytes": 500,
+            "framesOut": 1,
+            "pendingAfter": 360
+          },
+          {
+            "inputBytes": 500,
+            "framesOut": 1,
+            "pendingAfter": 220
+          }
+        ],
+        "flushBytes": 640
+      },
+      {
+        "name": "large buffer yields several frames",
+        "frameBytes": 640,
+        "pushes": [
+          {
+            "inputBytes": 1927,
+            "framesOut": 3,
+            "pendingAfter": 7
+          }
+        ],
+        "flushBytes": 640
+      }
+    ],
+    "pcm16Rms": {
+      "$comment": "Loudness of one frame, normalised to 0..1. An echo guard, a barge-in check and a voice segmenter all read it, so both SDKs must agree to the same value.",
+      "cases": [
+        {
+          "name": "silence is zero",
+          "pcmBase64": "AAAAAAAAAAA=",
+          "expected": 0.0
+        },
+        {
+          "name": "full scale negative",
+          "pcmBase64": "AIAAgA==",
+          "expected": 1.0
+        },
+        {
+          "name": "a square wave",
+          "pcmBase64": "IE7gsSBO4LE=",
+          "expected": 0.6103515625
+        },
+        {
+          "name": "one quiet sample",
+          "pcmBase64": "ZAA=",
+          "expected": 0.003051757812
+        },
+        {
+          "name": "mixed amplitudes",
+          "pcmBase64": "6AMw+LgLYPCIEw==",
+          "expected": 0.101215356151
+        },
+        {
+          "name": "an odd trailing byte is dropped, not raised",
+          "pcmBase64": "IE7gsX8=",
+          "expected": 0.6103515625
+        },
+        {
+          "name": "an empty frame is zero",
+          "pcmBase64": "",
+          "expected": 0.0
+        },
+        {
+          "name": "a single byte is zero",
+          "pcmBase64": "AQ==",
+          "expected": 0.0
+        }
+      ]
+    }
+  },
+  "hmacBody": {
+    "$comment": "Chat POSTs sign the exact bytes, with a 300000 ms replay window. WebSocket chat signs the channel name and stays at 60000 ms. Expected signatures match StandIn Autopilot; the estate chat reference is also pinned by the gateway and portal.",
+    "sign": [
+      {
+        "name": "estate chat reference",
+        "secret": "test-secret",
+        "timestampMs": "1700000000000",
+        "body": "hello",
+        "expected": "1ea836ba1a9714e5a5824a9026b2b40567ee9e5e2ddd0d1cb598da3b42afce38"
+      },
+      {
+        "name": "unicode chat body and secret",
+        "secret": "shared-秘密",
+        "timestampMs": "1700000000000",
+        "body": "{\"tenantId\":\"tenant-A\",\"text\":\"مرحبا 👋\"}",
+        "expected": "53902c9131da6318c245d8eed515a366c34aa9419da86491a899e83f6fb86158"
+      },
+      {
+        "name": "exact JSON whitespace",
+        "secret": "test-secret",
+        "timestampMs": "1700000000000",
+        "body": "{ \"tenantId\": \"tenant-A\", \"text\": \"hello\" }\n",
+        "expected": "7ea224a67874d443f51665a36bdb1c5a1158cb2fd9526c223773bc1d7ae667c7"
+      },
+      {
+        "name": "raw non-UTF8 bytes",
+        "secret": "test-secret",
+        "timestampMs": "1700000000000",
+        "bodyBase64": "AP/+Cg==",
+        "expected": "5fd1fb2857270fb54059e3264635e053c03138fa0a3a925abdce886ed6e98f9e"
+      },
+      {
+        "name": "empty body",
+        "secret": "test-secret",
+        "timestampMs": "1700000000000",
+        "body": "",
+        "expected": "27ae51cd1754dbdae532ea92ca49b7a352d4a2d8258c5e1105a6ef52a0c1e7a9"
+      }
+    ],
+    "clockSkew": [
+      {
+        "skewMs": 0,
+        "expected": true
+      },
+      {
+        "skewMs": 60000,
+        "expected": true
+      },
+      {
+        "skewMs": -60000,
+        "expected": true
+      },
+      {
+        "skewMs": 60001,
+        "expected": true
+      },
+      {
+        "skewMs": -60001,
+        "expected": true
+      },
+      {
+        "skewMs": 299999,
+        "expected": true
+      },
+      {
+        "skewMs": -299999,
+        "expected": true
+      },
+      {
+        "skewMs": 300000,
+        "expected": true
+      },
+      {
+        "skewMs": -300000,
+        "expected": true
+      },
+      {
+        "skewMs": 300001,
+        "expected": false
+      },
+      {
+        "skewMs": -300001,
+        "expected": false
+      }
+    ],
+    "malformedTimestamps": [
+      "",
+      " ",
+      "not-a-number",
+      "0x10",
+      "1e12",
+      "1700000000000.0",
+      "1_700_000_000_000",
+      "+1700000000000",
+      "１７０００００００００００",
+      "1700000\n000000"
+    ]
+  },
+  "hmacV2": {
+    "$comment": "HMAC-SHA256(secret, timestampMs + \".\" + METHOD + \"\\n\" + path + \"\\n\" + sha256_hex(raw_body)). These values are pinned independently on the StandIn service side, so a change here that the service does not make is a break, not a fix.",
+    "sign": [
+      {
+        "name": "worker and portal canonical reference",
+        "secret": "sec",
+        "timestampMs": "1700000000000",
+        "method": "POST",
+        "path": "/api/calls",
+        "body": "{\"UserObjectId\":\"u1\",\"TenantId\":\"tenant-A\"}",
+        "canonical": "POST\n/api/calls\n5aeb317f25a7e93a8257c2ce0a179f78bc507ecf72e8963d6f2ba97400b87f71",
+        "expected": "269b10f137bd1df14cdd87608e0f94aa638f5624b5fc98f3f5c895c588853722"
+      },
+      {
+        "name": "Autopilot outbound call with tenant",
+        "secret": "shared-xyz",
+        "timestampMs": "1700000000000",
+        "method": "post",
+        "path": "/api/calls",
+        "body": "{\"userObjectId\":\"u1\",\"tenantId\":\"tenant-A\"}",
+        "canonical": "POST\n/api/calls\n323086a97d9df79f78a1c0608c4f88b480efebcfa18dfc1b9384deb9327c64be",
+        "expected": "b4ed4f10d043c1c2758da1ce83cdb6b7f2b35ce560f278e58ba2da688786236a"
+      },
+      {
+        "name": "empty control GET",
+        "secret": "shared-xyz",
+        "timestampMs": "1700000000000",
+        "method": "GET",
+        "path": "/api/calls/call-1",
+        "body": "",
+        "canonical": "GET\n/api/calls/call-1\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "expected": "3bbe74737b60a69b59bbb16ef328c4656e8f5d78b90b41e3ed9f006a52bd0ba6"
+      },
+      {
+        "name": "unicode body and secret",
+        "secret": "shared-秘密",
+        "timestampMs": "1700000000000",
+        "method": "POST",
+        "path": "/api/calls",
+        "body": "{\"userObjectId\":\"用户\",\"tenantId\":\"tenant-A\",\"displayName\":\"مرحبا 👋\"}",
+        "canonical": "POST\n/api/calls\n69de9492e15380551bda1db72e7fdeec8d4c70b6f27a163639ee1771dcc680c3",
+        "expected": "c1b10a29b93b6a8d20d89048e7f15cbe9046376ae0f0fdb17a98b89d027b0b88"
+      },
+      {
+        "name": "exact JSON whitespace",
+        "secret": "sec",
+        "timestampMs": "1700000000000",
+        "method": "POST",
+        "path": "/api/calls",
+        "body": "{ \"UserObjectId\": \"u1\", \"TenantId\": \"tenant-A\" }\n",
+        "canonical": "POST\n/api/calls\nff0a13790c19bf809b90a10a1155b921c66839c713719720967be1c1b6a56e77",
+        "expected": "1ea10568164a99d6f051cbc659daae2e4c7fb1765280404a4e9fce42f1e67bd3"
+      },
+      {
+        "name": "raw non-UTF8 bytes",
+        "secret": "test-secret",
+        "timestampMs": "1700000000000",
+        "method": "POST",
+        "path": "/api/calls",
+        "bodyBase64": "AP/+Cg==",
+        "canonical": "POST\n/api/calls\nc412afa71666a0f30bfb9a622e8a3f22b73a9c73f660e3cf78469d6c5c462a42",
+        "expected": "5dc59d11bd19f493c53f5849944e60afbe5fe70899797f177f24c7609cdfda90"
+      }
+    ],
+    "tamperedRequests": [
+      {
+        "name": "tenant substitution",
+        "method": "POST",
+        "path": "/api/calls",
+        "body": "{\"UserObjectId\":\"u1\",\"TenantId\":\"tenant-B\"}"
+      },
+      {
+        "name": "user substitution",
+        "method": "POST",
+        "path": "/api/calls",
+        "body": "{\"UserObjectId\":\"u2\",\"TenantId\":\"tenant-A\"}"
+      },
+      {
+        "name": "method substitution",
+        "method": "DELETE",
+        "path": "/api/calls",
+        "body": "{\"UserObjectId\":\"u1\",\"TenantId\":\"tenant-A\"}"
+      },
+      {
+        "name": "path substitution",
+        "method": "POST",
+        "path": "/Calls",
+        "body": "{\"UserObjectId\":\"u1\",\"TenantId\":\"tenant-A\"}"
+      },
+      {
+        "name": "body reserialization",
+        "method": "POST",
+        "path": "/api/calls",
+        "body": "{\"TenantId\":\"tenant-A\", \"UserObjectId\":\"u1\"}"
+      }
+    ]
+  },
+  "chat": {
+    "$comment": [
+      "The Microsoft Teams messages lane. Python chat.py and TypeScript chat.ts must parse",
+      "and build byte-identical wire payloads: buildReply's tenantId/conversationId",
+      "echo is the cross-tenant leak guard the whole relay rests on, so a divergence",
+      "here is a security bug, not a cosmetic one."
+    ],
+    "schemaVersion": 1,
+    "parseInbound": {
+      "accepts": [
+        {
+          "name": "full message",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\", \"scope\": \"personal\", \"text\": \"hello\", \"sender\": {\"displayName\": \"Alaa\", \"aadObjectId\": \"aad-1\", \"isGuest\": false, \"isLinkedOwner\": true}, \"attachments\": [{\"contentType\": \"image/png\"}], \"mentions\": [\"bot\"], \"locale\": \"en-GB\"}",
+          "expected": {
+            "tenantId": "t-1",
+            "conversationId": "c-1",
+            "activityId": "a-1",
+            "scope": "personal",
+            "text": "hello",
+            "senderName": "Alaa",
+            "senderAadId": "aad-1",
+            "senderIsGuest": false,
+            "senderIsLinkedOwner": true,
+            "attachments": [
+              {
+                "contentType": "image/png"
+              }
+            ],
+            "mentions": [
+              "bot"
+            ],
+            "locale": "en-GB",
+            "cardAction": null,
+            "isPersonal": true
+          }
+        },
+        {
+          "name": "minimal message defaults to personal scope",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\"}",
+          "expected": {
+            "tenantId": "t-1",
+            "conversationId": "c-1",
+            "activityId": "a-1",
+            "scope": "personal",
+            "text": "",
+            "senderName": null,
+            "senderAadId": null,
+            "senderIsGuest": false,
+            "senderIsLinkedOwner": false,
+            "attachments": [],
+            "mentions": [],
+            "locale": null,
+            "cardAction": null,
+            "isPersonal": true
+          }
+        },
+        {
+          "name": "unknown scope is an OPEN enum, relayed not rejected",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\", \"scope\": \"channel-of-the-future\"}",
+          "expected": {
+            "tenantId": "t-1",
+            "conversationId": "c-1",
+            "activityId": "a-1",
+            "scope": "channel-of-the-future",
+            "text": "",
+            "senderName": null,
+            "senderAadId": null,
+            "senderIsGuest": false,
+            "senderIsLinkedOwner": false,
+            "attachments": [],
+            "mentions": [],
+            "locale": null,
+            "cardAction": null,
+            "isPersonal": false
+          }
+        },
+        {
+          "name": "non-string text reads as empty",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\", \"text\": 42}",
+          "expected": {
+            "tenantId": "t-1",
+            "conversationId": "c-1",
+            "activityId": "a-1",
+            "scope": "personal",
+            "text": "",
+            "senderName": null,
+            "senderAadId": null,
+            "senderIsGuest": false,
+            "senderIsLinkedOwner": false,
+            "attachments": [],
+            "mentions": [],
+            "locale": null,
+            "cardAction": null,
+            "isPersonal": true
+          }
+        },
+        {
+          "name": "non-list attachments and mentions are ignored",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\", \"attachments\": \"nope\", \"mentions\": 7}",
+          "expected": {
+            "tenantId": "t-1",
+            "conversationId": "c-1",
+            "activityId": "a-1",
+            "scope": "personal",
+            "text": "",
+            "senderName": null,
+            "senderAadId": null,
+            "senderIsGuest": false,
+            "senderIsLinkedOwner": false,
+            "attachments": [],
+            "mentions": [],
+            "locale": null,
+            "cardAction": null,
+            "isPersonal": true
+          }
+        },
+        {
+          "name": "card action with empty text",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\", \"text\": \"\", \"cardAction\": {\"verb\": \"approve\"}}",
+          "expected": {
+            "tenantId": "t-1",
+            "conversationId": "c-1",
+            "activityId": "a-1",
+            "scope": "personal",
+            "text": "",
+            "senderName": null,
+            "senderAadId": null,
+            "senderIsGuest": false,
+            "senderIsLinkedOwner": false,
+            "attachments": [],
+            "mentions": [],
+            "locale": null,
+            "cardAction": {
+              "verb": "approve"
+            },
+            "isPersonal": true
+          }
+        },
+        {
+          "name": "equal schemaVersion is accepted",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\", \"schemaVersion\": 1}",
+          "expected": {
+            "tenantId": "t-1",
+            "conversationId": "c-1",
+            "activityId": "a-1",
+            "scope": "personal",
+            "text": "",
+            "senderName": null,
+            "senderAadId": null,
+            "senderIsGuest": false,
+            "senderIsLinkedOwner": false,
+            "attachments": [],
+            "mentions": [],
+            "locale": null,
+            "cardAction": null,
+            "isPersonal": true
+          }
+        },
+        {
+          "name": "non-object sender is tolerated",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\", \"sender\": \"nope\"}",
+          "expected": {
+            "tenantId": "t-1",
+            "conversationId": "c-1",
+            "activityId": "a-1",
+            "scope": "personal",
+            "text": "",
+            "senderName": null,
+            "senderAadId": null,
+            "senderIsGuest": false,
+            "senderIsLinkedOwner": false,
+            "attachments": [],
+            "mentions": [],
+            "locale": null,
+            "cardAction": null,
+            "isPersonal": true
+          }
+        }
+      ],
+      "rejects": [
+        {
+          "name": "malformed json",
+          "body": "{not json"
+        },
+        {
+          "name": "body is an array",
+          "body": "[1,2,3]"
+        },
+        {
+          "name": "body is a string",
+          "body": "\"hello\""
+        },
+        {
+          "name": "missing tenantId",
+          "body": "{\"conversationId\": \"c\", \"activityId\": \"a\"}"
+        },
+        {
+          "name": "blank conversationId",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"\", \"activityId\": \"a-1\"}"
+        },
+        {
+          "name": "non-string activityId",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": 7}"
+        },
+        {
+          "name": "future schemaVersion is incompatible",
+          "body": "{\"tenantId\": \"t-1\", \"conversationId\": \"c-1\", \"activityId\": \"a-1\", \"schemaVersion\": 2}"
+        }
+      ]
+    },
+    "buildReply": [
+      {
+        "name": "reply kind=message",
+        "kind": "message",
+        "expected": {
+          "schemaVersion": 1,
+          "tenantId": "t-1",
+          "conversationId": "c-1",
+          "replyToId": "a-1",
+          "kind": "message",
+          "idempotencyKey": "a-1:message",
+          "text": "the answer"
+        }
+      },
+      {
+        "name": "reply kind=typing",
+        "kind": "typing",
+        "expected": {
+          "schemaVersion": 1,
+          "tenantId": "t-1",
+          "conversationId": "c-1",
+          "replyToId": "a-1",
+          "kind": "typing",
+          "idempotencyKey": "a-1:typing"
+        }
+      },
+      {
+        "name": "reply kind=error",
+        "kind": "error",
+        "expected": {
+          "schemaVersion": 1,
+          "tenantId": "t-1",
+          "conversationId": "c-1",
+          "replyToId": "a-1",
+          "kind": "error",
+          "idempotencyKey": "a-1:error",
+          "text": "the answer"
+        }
+      }
+    ]
+  },
+  "video": {
+    "$comment": "The vision lane. parseVideoFrame is deliberately lenient: an unusable frame is DROPPED, never raised, because one malformed image must not end a live call.",
+    "parseAccepts": [
+      {
+        "name": "a full screen-share frame",
+        "input": {
+          "type": "video.frame",
+          "source": "screenshare",
+          "ts": 1738000000000,
+          "width": 1280,
+          "height": 720,
+          "mime": "image/jpeg",
+          "dataBase64": "/9j/4AAQ",
+          "participantId": "aad-1",
+          "participantName": "Dana"
+        },
+        "expected": {
+          "source": "screenshare",
+          "ts": 1738000000000,
+          "width": 1280,
+          "height": 720,
+          "mime": "image/jpeg",
+          "dataBase64": "/9j/4AAQ",
+          "participantId": "aad-1",
+          "participantName": "Dana"
+        }
+      },
+      {
+        "name": "a camera frame with no identity and no mime",
+        "input": {
+          "source": "camera",
+          "ts": 7,
+          "width": 320,
+          "height": 240,
+          "dataBase64": "/9j/4AAQ"
+        },
+        "expected": {
+          "source": "camera",
+          "ts": 7,
+          "width": 320,
+          "height": 240,
+          "mime": "image/jpeg",
+          "dataBase64": "/9j/4AAQ",
+          "participantId": null,
+          "participantName": null
+        }
+      },
+      {
+        "name": "blank identity fields read as absent",
+        "input": {
+          "source": "camera",
+          "ts": 0,
+          "width": 2,
+          "height": 2,
+          "dataBase64": "/9j/4AAQ",
+          "participantId": "   ",
+          "participantName": ""
+        },
+        "expected": {
+          "source": "camera",
+          "ts": 0,
+          "width": 2,
+          "height": 2,
+          "mime": "image/jpeg",
+          "dataBase64": "/9j/4AAQ",
+          "participantId": null,
+          "participantName": null
+        }
+      },
+      {
+        "name": "a malformed timestamp becomes zero rather than dropping the frame",
+        "input": {
+          "source": "camera",
+          "ts": -5,
+          "width": 2,
+          "height": 2,
+          "dataBase64": "/9j/4AAQ"
+        },
+        "expected": {
+          "source": "camera",
+          "ts": 0,
+          "width": 2,
+          "height": 2,
+          "mime": "image/jpeg",
+          "dataBase64": "/9j/4AAQ",
+          "participantId": null,
+          "participantName": null
+        }
+      }
+    ],
+    "parseRejects": [
+      {
+        "name": "unknown source",
+        "input": {
+          "source": "whiteboard",
+          "width": 2,
+          "height": 2,
+          "dataBase64": "/9j/4AAQ"
+        }
+      },
+      {
+        "name": "missing source",
+        "input": {
+          "width": 2,
+          "height": 2,
+          "dataBase64": "/9j/4AAQ"
+        }
+      },
+      {
+        "name": "empty payload",
+        "input": {
+          "source": "camera",
+          "width": 2,
+          "height": 2,
+          "dataBase64": ""
+        }
+      },
+      {
+        "name": "missing payload",
+        "input": {
+          "source": "camera",
+          "width": 2,
+          "height": 2
+        }
+      },
+      {
+        "name": "payload is not base64",
+        "input": {
+          "source": "camera",
+          "width": 2,
+          "height": 2,
+          "dataBase64": "not base64!"
+        }
+      },
+      {
+        "name": "payload has non-canonical padding",
+        "input": {
+          "source": "camera",
+          "width": 2,
+          "height": 2,
+          "dataBase64": "/9j/4A"
+        }
+      },
+      {
+        "name": "zero width",
+        "input": {
+          "source": "camera",
+          "width": 0,
+          "height": 2,
+          "dataBase64": "/9j/4AAQ"
+        }
+      },
+      {
+        "name": "negative height",
+        "input": {
+          "source": "camera",
+          "width": 2,
+          "height": -1,
+          "dataBase64": "/9j/4AAQ"
+        }
+      },
+      {
+        "name": "missing dimensions",
+        "input": {
+          "source": "camera",
+          "dataBase64": "/9j/4AAQ"
+        }
+      },
+      {
+        "name": "fractional width",
+        "input": {
+          "source": "camera",
+          "width": 2.5,
+          "height": 2,
+          "dataBase64": "/9j/4AAQ"
+        }
+      }
+    ],
+    "displayImage": [
+      {
+        "name": "defaults carry the reserved timeline anchor",
+        "dataBase64": "/9j/4AAQ",
+        "expected": {
+          "type": "display.image",
+          "dataBase64": "/9j/4AAQ",
+          "mime": "image/jpeg",
+          "ts": 0
+        }
+      },
+      {
+        "name": "every option",
+        "dataBase64": "/9j/4AAQ",
+        "mime": "image/png",
+        "durationMs": 4000,
+        "mode": "overlay",
+        "caption": "Q3 revenue",
+        "expected": {
+          "type": "display.image",
+          "dataBase64": "/9j/4AAQ",
+          "mime": "image/png",
+          "ts": 0,
+          "durationMs": 4000,
+          "mode": "overlay",
+          "caption": "Q3 revenue"
+        }
+      },
+      {
+        "name": "a non-positive duration falls back to the service default",
+        "dataBase64": "/9j/4AAQ",
+        "durationMs": 0,
+        "expected": {
+          "type": "display.image",
+          "dataBase64": "/9j/4AAQ",
+          "mime": "image/jpeg",
+          "ts": 0
+        }
+      }
+    ],
+    "displayFrame": [
+      {
+        "name": "the minimum a stream frame carries",
+        "seq": 1,
+        "ts": 20,
+        "dataBase64": "/9j/4AAQ",
+        "expected": {
+          "type": "display.frame",
+          "seq": 1,
+          "ts": 20,
+          "mime": "image/jpeg",
+          "dataBase64": "/9j/4AAQ"
+        }
+      },
+      {
+        "name": "informational dimensions are passed through",
+        "seq": 2,
+        "ts": 40,
+        "dataBase64": "/9j/4AAQ",
+        "width": 640,
+        "height": 360,
+        "expected": {
+          "type": "display.frame",
+          "seq": 2,
+          "ts": 40,
+          "mime": "image/jpeg",
+          "dataBase64": "/9j/4AAQ",
+          "width": 640,
+          "height": 360
+        }
+      }
+    ]
+  },
+  "avatar": {
+    "$comment": "The avatar lane. Both messages are additive and best-effort: they change the bot's video tile and never a sample of the audio, so neither can fail a call.",
+    "expression": [
+      {
+        "name": "a well-known emotion",
+        "input": "happy",
+        "expected": {
+          "type": "expression",
+          "emotion": "happy"
+        }
+      },
+      {
+        "name": "an unknown emotion is sent as-is and renders neutral",
+        "input": "wistful",
+        "expected": {
+          "type": "expression",
+          "emotion": "wistful"
+        }
+      },
+      {
+        "name": "surrounding space is trimmed",
+        "input": "  sad  ",
+        "expected": {
+          "type": "expression",
+          "emotion": "sad"
+        }
+      }
+    ],
+    "expressionRejects": [
+      {
+        "name": "empty",
+        "input": ""
+      },
+      {
+        "name": "only whitespace",
+        "input": "   "
+      },
+      {
+        "name": "an emotion longer than the bound",
+        "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    ],
+    "speechMarks": [
+      {
+        "name": "marks are sorted onto the utterance timeline",
+        "input": [
+          {
+            "tMs": 40,
+            "visemeId": 3
+          },
+          {
+            "tMs": 0,
+            "visemeId": 1
+          }
+        ],
+        "expected": {
+          "type": "speech.marks",
+          "ts": 0,
+          "marks": [
+            {
+              "tMs": 0,
+              "visemeId": 1
+            },
+            {
+              "tMs": 40,
+              "visemeId": 3
+            }
+          ]
+        }
+      },
+      {
+        "name": "a viseme outside the Azure numbering is dropped, not sent",
+        "input": [
+          {
+            "tMs": 0,
+            "visemeId": 1
+          },
+          {
+            "tMs": 20,
+            "visemeId": 99
+          },
+          {
+            "tMs": 30,
+            "visemeId": -1
+          }
+        ],
+        "expected": {
+          "type": "speech.marks",
+          "ts": 0,
+          "marks": [
+            {
+              "tMs": 0,
+              "visemeId": 1
+            }
+          ]
+        }
+      },
+      {
+        "name": "a negative offset is dropped",
+        "input": [
+          {
+            "tMs": -5,
+            "visemeId": 2
+          },
+          {
+            "tMs": 10,
+            "visemeId": 21
+          }
+        ],
+        "expected": {
+          "type": "speech.marks",
+          "ts": 0,
+          "marks": [
+            {
+              "tMs": 10,
+              "visemeId": 21
+            }
+          ]
+        }
+      },
+      {
+        "name": "an empty timeline is still a valid message",
+        "input": [],
+        "expected": {
+          "type": "speech.marks",
+          "ts": 0,
+          "marks": []
+        }
+      }
+    ]
+  }
+}

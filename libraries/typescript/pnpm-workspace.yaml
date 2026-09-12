@@ -1,0 +1,32 @@
+# Settings only. There is no workspace any more.
+#
+# The TypeScript half of the StandIn SDK is ONE package: the SDK core plus every
+# plugin, so nothing here needs linking to anything else and there is no
+# `packages:` list. The file survives because pnpm 11 stopped reading the `pnpm`
+# field from package.json and made this its settings home instead - putting these
+# two blocks back in package.json gets them silently ignored with a warning.
+#
+# The Python half is ../python, at parity, speaking the same wire protocol from
+# ../../protocol. Which language a plugin lives in is decided by the
+# framework it integrates, not by preference: OpenClaw and n8n are TypeScript,
+# Hermes is Python, LiveKit is both.
+
+# @types/ws declares "@types/node": "*", which drags in a second major and makes
+# ChildProcess/EventEmitter clash. Pin one.
+overrides:
+  "@types/node": "^22"
+
+# pnpm 11 blocks postinstall scripts unless named. esbuild (vitest's bundler)
+# genuinely needs its own: it downloads the platform binary. Nothing else here
+# runs a script, and that is worth keeping true.
+# openclaw is a devDependency present ONLY so tsc can resolve the real plugin-sdk
+# typings. Nothing here runs it, so its postinstall chain (native builds for
+# genai, protobufjs, tree-sitter) is DECLINED: approving it would put a native
+# toolchain on the critical path of every clone and every CI run, to compile code
+# this repo never executes.
+allowBuilds:
+  '@google/genai': false
+  esbuild: true
+  openclaw: false
+  protobufjs: false
+  tree-sitter-bash: false
