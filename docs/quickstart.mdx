@@ -1,0 +1,140 @@
+---
+title: "Quickstart"
+description: "Answer a real Microsoft Teams call with the StandIn SDK: install the package, expose one port, register the agent voice URL, and hear yourself back."
+keywords: ["StandIn quickstart","standin-sdk install","@komaa/standin-sdk","Microsoft Teams call echo test","STANDIN_SECRET","msteams/calling","agent voice URL"]
+---
+
+This gets you to a live Microsoft Teams call answered by an echo. Nothing about your agent is involved yet,
+which is the point: if the echo answers, your secret, your tunnel and your StandIn identity are all
+correct, and every later failure is your agent's.
+
+## Prerequisites
+
+- A **StandIn identity** at [standin.komaa.com](https://standin.komaa.com). This is the hosted
+  service that joins the Microsoft Teams call and dials your worker.
+- A **Microsoft Teams identity** for the bot. This is the choice that decides how much Azure work you do:
+  - **Install StandIn from the Microsoft Teams Store.** No Azure app registration, no App ID, no
+    client secret. Add the app, type `signin`, and connect your agent from the StandIn portal. A
+    Microsoft 365 admin approves calling once for the organization.
+  - **Bring your own Microsoft Teams bot** (an Azure Entra app) and connect it to StandIn. See
+    [Microsoft Teams setup](/teams/overview). Choose this when the bot must carry your own name and live
+    entirely in your tenant.
+
+  [Connection modes](/teams/connection-modes) compares the two in full.
+- **Python 3.10 or newer**, or **Node.js 20 or newer**, depending on which SDK you use. The
+  OpenClaw plugin follows its host and wants Node 22.19, but that travels with the plugin and
+  nothing else in the TypeScript SDK asks for it.
+- A way to publish one local port over HTTPS: a tunnel such as Tailscale Funnel, or an ingress.
+  [Expose your agent](/expose) covers both.
+
+<Tip>
+To hear an agent talk with **no Microsoft Teams identity at all**, a shared StandIn bot can join a public
+meeting StandIn generates. See [Sandbox (community tier)](/community). It is metered.
+</Tip>
+
+## 1. Run the echo
+
+The echo plugin sends the caller's voice back. Run one of these, not both.
+
+<CodeGroup>
+```bash Python
+python3 -m venv .venv
+source .venv/bin/activate
+pip install standin-sdk
+export STANDIN_SECRET="your-StandIn-connection-secret"
+export STANDIN_HOST="127.0.0.1"
+python -m standin.plugins.echo
+```
+
+```bash TypeScript
+npm install @komaa/standin-sdk
+export STANDIN_SECRET="your-StandIn-connection-secret"
+export STANDIN_HOST="127.0.0.1"
+npx standin-echo
+```
+</CodeGroup>
+
+`STANDIN_SECRET` is the connection secret from your StandIn identity, and it is what arms the
+listener: without it the SDK refuses to start rather than serving an unauthenticated socket.
+
+`STANDIN_HOST=127.0.0.1` keeps the listener on loopback so only your tunnel reaches it. The SDK's
+own default is `0.0.0.0`, which is right for a container behind an ingress and wrong for a laptop.
+
+The listener now sits on port `9442` at path `/msteams/calling`.
+
+**Prove it before you expose anything.** The SDK ships an install check that rings your own handler
+on loopback: it binds an ephemeral listener, speaks the real call wire to it, streams a few frames
+and reports whether audio came back, with no tunnel, no provider bill and no Microsoft tenant
+involved. It is the fastest answer to "is my install working", and it is worth running before the
+first real call rather than after it: [Checking the install](/python-sdk/checking-the-install) in
+Python, [Checking the install](/typescript-sdk/checking-the-install) in TypeScript.
+
+## 2. Publish the port
+
+StandIn dials you from the internet, so a loopback-only listener is invisible to it. Publish port
+`9442` at `/msteams/calling`, and keep the path in the proxy target or the request reaches your
+worker stripped. [Expose your agent](/expose#mount-the-call-path) carries the one copy of the mount
+command, plus the ngrok, cloudflared and devtunnel equivalents.
+
+Confirm the mount, and probe it, before you register anything. A registered mount is not a working
+mount, and a probe sent without `--http1.1` never arrives as an upgrade at all, so whatever it
+answers proves nothing: [Probe it by hand](/expose#probe-it-by-hand).
+
+## 3. Register the agent voice URL
+
+In your StandIn identity, set the **agent voice URL** to the public address of that path:
+
+```
+wss://<your-public-host>/msteams/calling
+```
+
+Paste a bare host and StandIn appends the default path. Paste a full URL and it is respected as
+given. The secret you registered must **byte-match** `STANDIN_SECRET`: a mismatch fails the HMAC
+handshake silently, which is the single most common first-call failure.
+
+## 4. Call it
+
+Call your StandIn identity from Microsoft Teams and talk. You should hear yourself back.
+
+If nothing happens, work through [Troubleshooting](/troubleshooting) top to bottom: secret,
+reachability, address. Do not start by suspecting the SDK.
+
+## Configuration
+
+The SDK reads its settings from the environment and ships no config file of its own. A plugin that
+runs **inside another runtime** is configured by that runtime instead, which is why the OpenClaw
+plugin takes its secret and its port from OpenClaw's own config block rather than from any of the
+variables below. These are the variables this page uses:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `STANDIN_SECRET` | none, **required** | The connection secret. Signs the handshake on both lanes. Without it the SDK raises rather than starting. |
+| `STANDIN_PORT` | `9442` | Port the call listener binds. |
+| `STANDIN_HOST` | `0.0.0.0` | Bind address. Set `127.0.0.1` when a tunnel is in front. |
+| `STANDIN_WS_PATH` | `/msteams/calling` | Path StandIn dials. StandIn appends `/{callId}` per call. |
+| `STANDIN_CHAT_URL` | StandIn's chat channel | Only for the outbound chat lane. Override it when StandIn gives you a different chat address. |
+| `STANDIN_CHAT_SECRET` | falls back to `STANDIN_SECRET` | Only for the chat lane. A managed connection may issue a second key for chat; set it and the chat lane signs with that one instead. |
+
+Those are the ones the echo and the chat lane need, not the whole list: placing a call, vision,
+sending a picture and the on-disk state directory each read their own, and the two SDKs do not read
+an identical set. Every `STANDIN_` variable each one reads is tabulated in one place, so a
+deployment is not configured out of nine pages:
+[Configuration](/python-sdk/configuration) in Python,
+[Configuration](/typescript-sdk/configuration) in TypeScript.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Python SDK" icon="python" href="/python-sdk/overview">
+    The handler contract, the audio helpers, the chat lane, and the LiveKit and Hermes plugins.
+  </Card>
+  <Card title="TypeScript SDK" icon="js" href="/typescript-sdk/overview">
+    The same contract in TypeScript, and the OpenClaw plugin.
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    What the SDK owns, what you own, and what crosses the wire.
+  </Card>
+  <Card title="Microsoft Teams setup" icon="microsoft" href="/teams/overview">
+    The Azure bot, the app package, and the admin consent calling needs.
+  </Card>
+</CardGroup>

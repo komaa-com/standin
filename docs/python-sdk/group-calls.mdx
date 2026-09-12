@@ -1,0 +1,264 @@
+---
+title: "Group calls"
+description: "GroupGate, wake phrases, the follow-up window and verbal interrupts for an agent in a Microsoft Teams meeting, in the StandIn Python SDK."
+keywords: ["Microsoft Teams meeting AI agent", "wake phrase group call", "GroupGate follow-up window", "verbal interrupt stop playback", "meeting thread id"]
+icon: "users"
+---
+
+A 1:1 call is simple: every turn is for you. A meeting is not. People talk to each other, and an agent that answers every turn of a meeting is worse than one that says nothing, because it has to be muted or removed before the meeting can continue.
+
+Two decisions follow from that, and both are taken here rather than by your model:
+
+- **who gets answered**, so the agent stays out of a conversation it was not invited into
+- **what stops playback**, so "stop" stops it whether or not the model would have chosen to
+
+Both are taken deterministically in code, on a **finished** caller turn, and they consume the same thing: one transcript, once. Neither is left to the model, for the same two reasons. A model asked "was that for you?" has already been invoked, so a refused turn still costs a round trip and a bill. And a model asked to decide whether to keep talking is a model that is still talking while it decides.
+
+```python
+from standin import (
+    DEFAULT_FOLLOW_UP_WINDOW_MS,
+    GateDecision,
+    GroupGate,
+    is_addressed,
+    is_meeting_thread,
+    is_verbal_interrupt,
+)
+```
+
+Every name on this page is exported from `standin`. They live in `standin.gate` if you would rather import the module.
+
+## How the SDK knows it is a group call
+
+`is_meeting_thread(thread_id)` is the primary signal, and it is a string test:
+
+```python
+from standin import is_meeting_thread
+
+is_meeting_thread("19:meeting_abc@thread.v2")  # True
+is_meeting_thread("8:orgid:0f2a...")           # False
+is_meeting_thread(None)                        # False
+```
+
+Microsoft's thread id for a meeting or a channel conversation begins `19:`. A 1:1 call has no such thread at all, so the presence of one is the signal. It reaches you as `session.start.thread_id`, on every call, before the caller has said a word. See [Call handler](/python-sdk/call-handler#callsession).
+
+<Warning>
+  **A participant count never arrives on the meeting-join path.** A gate keyed on the count alone is dead on exactly the calls it exists for: every meeting the agent is invited to reads as a 1:1, and the agent answers every turn of it. The failure looks like a gate that was never switched on rather than one that was keyed to the wrong field, which is what makes it expensive to find.
+</Warning>
+
+That is not a hypothetical. The same mistake in the recap path sent every meeting recap to one attendee's private chat instead of to the meeting it summarised, because the count was pinned at 1 there too. See [Meeting recap](/python-sdk/minutes).
+
+`note_participants(count)` is the second signal, and it is deliberately weaker:
+
+```python
+from standin import CallSession, GroupGate
+
+
+class MyHandler:
+    def __init__(self) -> None:
+        self._call: CallSession | None = None
+        self._gate: GroupGate | None = None
+
+    async def on_start(self, session: CallSession) -> None:
+        self._call = session
+        self._gate = GroupGate(
+            wake_phrases=("assistant",),
+            thread_id=session.start.thread_id,
+        )
+
+    async def on_context(self, text: str) -> None:
+        # CallServer already parsed the count for you; read it, do not scrape it.
+        count = self._call.participant_count if self._call else 0
+        if count and self._gate:
+            self._gate.note_participants(count)
+        await self._send_to_model(text)
+```
+
+It corroborates and it never overrules. The count is kept as a running maximum, so a count of `1` arriving on a meeting thread adds nothing and takes nothing away: `gate.is_group` stays true. The count is the signal that goes missing, so it may add certainty and must not remove it.
+
+`is_group` is true when either signal says so: a meeting thread, or a count of two or more. That covers the group call that is not a meeting thread as well as the meeting whose count never came.
+
+Context sentences arrive at `on_context`, which is also where the recording status and keypad presses land. The count behind the sentence is on the session as `participant_count`, so there is nothing to parse out of the prose. See [Call handler](/python-sdk/call-handler#on_context).
+
+## Wake phrases and the follow-up window
+
+```python
+from standin import GroupGate
+
+gate = GroupGate(
+    wake_phrases=("assistant", "مساعد"),
+    require_address=True,                 # default
+    follow_up_window_ms=12_000,           # DEFAULT_FOLLOW_UP_WINDOW_MS
+    thread_id=session.start.thread_id,    # default ""
+)
+```
+
+The constructor is keyword only, and one gate belongs to one call: the follow-up window is per-call state.
+
+`decide(transcript, now_ms)` returns a frozen `GateDecision` with two fields:
+
+| Field | What it means |
+|---|---|
+| `respond` | Speak an answer to this turn. |
+| `addressed` | This turn named the assistant. Opens the follow-up window. |
+
+```python
+gate.decide("what do you all think?", 1_000)      # respond=False, addressed=False
+gate.decide("assistant, summarise that", 2_000)   # respond=True,  addressed=True
+gate.decide("and the second point?", 7_000)       # respond=True,  addressed=False
+gate.decide("anyway, lunch", 20_000)              # respond=False, addressed=False
+```
+
+The window is why `addressed` is reported separately from `respond` rather than folded into it. A turn inside the window is answered **without having been addressed**, and only an addressed turn reopens the window. Those are different facts about the same turn, and conflating them costs you both: you cannot log who actually named the agent, and a follow-up would keep the floor open forever by being answered.
+
+The window is stored as a timestamp rather than a latched boolean. A missed wake phrase therefore self-heals by the clock instead of stranding the agent silent, or talkative, for the rest of the meeting.
+
+`now_ms` is yours to supply, and the gate never reads a clock itself. Pass a monotonic source, `time.monotonic() * 1000.0`, so a clock that steps sideways cannot open or close the floor at random. It also makes the whole decision testable without waiting twelve seconds.
+
+`require_address=False` turns the gate off entirely and answers everything, on a meeting thread or not.
+
+On a 1:1 call the gate returns `respond=True` for every turn, and `addressed` still tells you truthfully whether the caller used your name. That is worth having even when nothing is being gated.
+
+## A gate with no phrase never opens
+
+`gate.active` is the question "is this gate muting anything right now?", and it is false unless all three of these hold: the call is a group, `require_address` is on, and **at least one non-blank wake phrase is configured**.
+
+```python
+gate = GroupGate(wake_phrases=(), thread_id="19:meeting_abc@thread.v2")
+gate.active                     # False
+gate.decide("hello", 1_000)     # respond=True
+```
+
+An empty wake list means the gate is off, on purpose. A gate with nothing that could ever open it would mute the assistant for the whole call, and nothing in the transcript would ever explain why. Silence is the one failure a caller cannot interpret and an operator cannot debug: it looks identical to a dead socket, a crashed worker and an agent that is thinking. A blank or whitespace-only phrase counts as no phrase, because a configuration file with an empty string in it is the usual way this happens.
+
+## Matching a name
+
+`is_addressed(transcript, wake_phrases)` is a case-insensitive match on **word boundaries**, not substrings.
+
+```python
+from standin import is_addressed
+
+is_addressed("assistant, what is the plan?", ("assistant",))  # True
+is_addressed("ASSISTANT, hello", ("assistant",))              # True
+is_addressed("the assistants are ready", ("assistant",))      # False
+is_addressed("مرحبا مساعد كيف حالك", ("مساعد",))              # True
+```
+
+Boundaries rather than substrings because a substring match on a short name fires inside ordinary words, and the way that failure presents itself is the agent interrupting a meeting, which is the exact thing the gate was added to prevent.
+
+The boundary is written as "not preceded or followed by a word character", and Python's `\w` is Unicode-aware by default, so an Arabic wake phrase behaves the same as a Latin one and needs no special case in your configuration. Phrases are stripped and lowercased before matching, regex metacharacters in them are escaped, and an empty phrase never matches.
+
+<Note>
+  Choose a wake phrase that is not an ordinary word in the language the call will be held in. Word boundaries stop `assistant` matching `assistants`; they do not stop a name that happens to be a common noun from matching every time somebody uses it.
+</Note>
+
+## Stop means stop
+
+```python
+from standin import is_verbal_interrupt
+
+is_verbal_interrupt("stop by the store")            # False
+is_verbal_interrupt("Stop! Stop!")                  # True
+is_verbal_interrupt("ok stop")                      # True
+is_verbal_interrupt("Assistant, stop.", ("assistant",))  # True
+```
+
+`is_verbal_interrupt(transcript, wake_phrases=())` matches the **whole normalised utterance**, never a substring. "stop by the store" is a sentence somebody said in a meeting, and a substring rule would cut the agent off mid-answer every time it came up. Whole-utterance is the rule that makes this safe to run on every turn.
+
+Before the comparison the utterance is normalised: NFKC, lowercased, Arabic diacritics and tatweel removed so a vocalised `تَوَقَّف` matches, and punctuation collapsed to single spaces.
+
+Then filler and wake phrases are peeled off **both ends**, repeatedly until nothing changes. "Hermes, please stop" and "hold on, assistant" both reduce to the bare phrase, because the name can sit outside the filler or inside it and both orders are things people say. Pass your wake phrases in, or the name you chose will be the thing that defeats the match.
+
+Interrupt phrases ship for four languages: English, Arabic, French and German. `stop`, `wait`, `hold on`, `hold up`, `never mind`, `cancel`, `توقف`, `خلاص`, `arrête`, `ça suffit`, `stopp`, `das reicht` and their close neighbours. The set is a module-private constant in `standin.gate` and there is no hook to extend it, so a phrase your callers use and the set does not is a wrapper around `is_verbal_interrupt`, not a configuration key.
+
+One consequence worth knowing before you rely on it: the wake phrase on its own is an address and not a cut, because `"assistant?"` peels down to nothing and nothing never matches.
+
+<Note>
+  This is the fast path for the unambiguous case, not a replacement for your model's judgement. "could you stop" and "stop talking" are not in the set and return `False`, because widening the rule to catch them is how a set of whole-utterance phrases turns back into substring matching.
+</Note>
+
+An interrupt is worth nothing on its own. Pair it with `session.cancel_playback()`:
+
+```python
+async def on_caller_turn(self, text: str) -> None:
+    if is_verbal_interrupt(text, self._wake_phrases):
+        await self._call.cancel_playback()    # first: un-send what is queued
+        await self._client.cancel_response()  # then: stop generating more
+        return
+```
+
+`cancel_playback()` first, because it is the only lever that un-sends audio StandIn already holds. Cancelling the model first stops it producing more, and the caller still hears every buffered sample of the answer they just interrupted. A caller who has said "stop" has stopped listening, and several seconds of the agent carrying on afterwards reads as the agent ignoring them. See [Barge-in](/python-sdk/call-handler#barge-in-and-cancel-playback).
+
+Suppress the reply to the interruption itself too. "stop" does not want an answer, it wants silence, and an agent that says "of course, I will stop" has not stopped.
+
+## Where to call it
+
+On a finished transcript, once, before you spend a model call.
+
+```python
+import time
+
+from standin import is_verbal_interrupt
+
+
+async def on_caller_turn(self, text: str) -> None:
+    """The provider reported a finished caller transcript."""
+    # Interrupts first: "stop" is not a turn to answer, and scoring it for
+    # wake phrases can only end in answering it.
+    if is_verbal_interrupt(text, self._wake_phrases):
+        await self._call.cancel_playback()
+        await self._client.cancel_response()
+        return
+
+    decision = self._gate.decide(text, time.monotonic() * 1000.0)
+    if not decision.respond:
+        await self._client.cancel_response()
+        return
+
+    await self._client.create_response()
+```
+
+Three things about that order and that placement.
+
+**Interrupts before the gate.** Run the gate first and "stop" is scored as an ordinary turn: inside the follow-up window it is answered, and "of course, I will stop" is the one reply a caller who said stop must never hear.
+
+**Finished transcripts, not partials.** A partial has not necessarily reached the name yet, so a gate run on partials refuses turns it would have accepted a syllable later. If you want the window stamped as early as possible, guard the partial path with `is_addressed` and let only that call `decide`: because the window is a timestamp, a stamp can only ever open the floor, never close it.
+
+```python
+def _on_caller_transcript(self, text: str, final: bool) -> None:
+    if not final:
+        if is_addressed(text, self._gate.wake_phrases):
+            self._gate.decide(text, time.monotonic() * 1000.0)
+        return
+    self._last_decision = self._gate.decide(text, time.monotonic() * 1000.0)
+```
+
+**Before the model call, not after.** A refused turn should cost nothing. If your provider answers on its own voice detection, put it in manual response mode while `gate.is_group` is true and create the response yourself when `decision.respond` is true. A response cancelled after it has started generating is one the caller has already heard the beginning of, and a meeting hears the agent start to speak and then stop, which is more disruptive than either answering or staying quiet.
+
+There is one thing to check before any of this: whether your provider gives you a caller transcript at all. Without one there is nothing to gate on and nothing to match an interrupt against. Log that loudly at startup rather than shipping a gate that silently never fires, and leave auto-response on, because an ungated assistant is at least an assistant.
+
+## What is not the same in the TypeScript SDK
+
+The gate itself is. `GroupGate`, `GateDecision`, `isAddressed`, `isMeetingThread`, `isVerbalInterrupt` and `DEFAULT_FOLLOW_UP_WINDOW_MS` exist there under the same names in camelCase, with the same twelve second default, the same thread-id rule and the same "no phrase means no gate" catch. Porting a gate between the languages changes the casing, and one thing that is language-shaped rather than a decision: the constructor takes keyword arguments here and a single options object there.
+
+Two things around it are not the same, and both will bite a port that assumes otherwise.
+
+**The interrupt phrase set differs by language and by membership.** This SDK ships English, Arabic, French and German; the TypeScript SDK ships English and Arabic. The lists are not translations of each other either: `"cancel"`, `"stop stop"` and `"hold up"` match here and not there, and `"stop talking"`, `"hang on"`, `"pause"` and `"one second"` match there and not here. The TypeScript implementation also caps the reduced utterance at four words as a second guard against an accidental match; this one has no such cap and leans entirely on the phrase set being exact. Test the phrases your callers actually use, in the SDK you are actually running, rather than porting a test suite across.
+
+**The echo guard is a different shape entirely.** This SDK has an `EchoGuard` class that owns its own playout clock, and because that clock is monotonic milliseconds, a single `time.monotonic() * 1000.0` serves both the gate and the guard on the same call. The TypeScript SDK has a `shouldSuppressEcho` function, no class, and a playout horizon you keep yourself: it must be on the epoch-millisecond scale, so there the shared source has to be `Date.now()` and the monotonic option the gate would otherwise accept stops the guard firing at all. [Realtime providers](/python-sdk/realtime-providers) spells the difference out in full.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Realtime providers" icon="bolt" href="/python-sdk/realtime-providers">
+    The startup buffer and the echo guard, for a speech-to-speech agent.
+  </Card>
+  <Card title="Turn-taking" icon="waveform-lines" href="/python-sdk/voice">
+    For an agent that is not speech to speech: segmentation, WAV and paced playback.
+  </Card>
+  <Card title="Call handler" icon="code" href="/python-sdk/call-handler">
+    Where the transcript, the context and `cancel_playback` reach you.
+  </Card>
+  <Card title="Meeting recap" icon="file-lines" href="/python-sdk/minutes">
+    The other decision the meeting thread id makes for you.
+  </Card>
+</CardGroup>

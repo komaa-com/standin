@@ -1,0 +1,275 @@
+---
+title: "Audio"
+description: "Sample rates, the 640-byte frame, resamplePcm16 and FrameAligner in the StandIn TypeScript SDK."
+keywords: ["PCM16 16kHz", "resamplePcm16", "FrameAligner", "24kHz realtime audio", "voice agent audio"]
+icon: "waveform"
+---
+
+The StandIn wire is PCM 16 kHz, 16-bit, mono, little-endian in both directions. Almost nothing else
+is. The realtime speech-to-speech models speak 24 kHz, most TTS vendors emit 22.05 or 24 kHz, and none
+of them chunk on the wire's frame boundary.
+
+So every plugin that is not a pure passthrough ends up writing the same two things: a resampler,
+because the rates differ, and a frame aligner, because a resampled buffer does not divide evenly into
+the wire's 640-byte frame. They ship in the SDK because they are properties of the **wire**, not of
+any framework, for the same reason the sequence number lives in `CallServer`. A plugin that has to
+reimplement them is a plugin the SDK failed.
+
+## Constants
+
+```ts
+import {
+  SAMPLE_RATE_HZ,          // 16000, the wire
+  REALTIME_SAMPLE_RATE_HZ, // 24000, what realtime models speak
+  FRAME_MS,                // 20
+  FRAME_BYTES,             // 640 = 16000 * 2 * 20 / 1000
+  BYTES_PER_SAMPLE,        // 2
+  NUM_CHANNELS,            // 1
+} from "@komaa/standin-sdk";
+```
+
+`REALTIME_SAMPLE_RATE_HZ` is named in the SDK rather than in a plugin because the **ratio** is what
+forces the residual buffer below, and that is an audio concern rather than a provider one.
+
+## `frameDurationMs(pcm)`
+
+Duration of a PCM16 mono buffer in milliseconds. Use this for a playout clock rather than counting
+frames: outbound chunk lengths are not fixed, so a frame count drifts against real time.
+
+```ts
+import { frameDurationMs } from "@komaa/standin-sdk";
+
+playbackEndAt = Math.max(playbackEndAt, Date.now()) + frameDurationMs(pcm16k);
+```
+
+Knowing when your own audio stops playing is what lets an echo guard tell the caller's voice apart
+from your agent's voice coming back up a speakerphone. That clock is the whole basis of the guard, and
+[Realtime providers](/typescript-sdk/realtime-providers#a-playout-clock-not-a-send-clock) is where it
+is spelled out.
+
+## `pcm16Rms(pcm)`
+
+How loud one frame is, as root mean square normalised to 0.0 to 1.0.
+
+```ts
+import { pcm16Rms } from "@komaa/standin-sdk";
+
+const loud = pcm16Rms(pcm) >= 0.02;
+```
+
+It lives here because three separate things want it and every plugin that wanted it had been writing
+it again: the [utterance segmenter](/typescript-sdk/voice#one-utterance-per-phrase) opens its gate on
+it, the [echo guard](/typescript-sdk/realtime-providers#the-agent-answering-itself) decides
+echo from barge-in with it, and a barge-in check of your own can use it directly. It is
+dependency-free and loop-simple for the same reason the resampler is: it runs on every inbound frame
+of every call.
+
+An odd trailing byte is dropped rather than throwing, and an empty buffer is `0`.
+
+## Agent audio can be dropped
+
+Everything above gets whole frames onto the wire. The wire can still refuse them.
+
+When the socket has more than 1 MB (`MAX_AUDIO_BUFFER_BYTES`) unflushed, `sendAudio` advances the
+timeline and returns **without sending**, logging at most once every five seconds. The caller hears a
+gap rather than the call wedging, and the timeline still advances because a dropped frame is a gap in
+what they hear rather than a rewind: stalling the clock would make every later frame claim a time
+that has already passed. Control frames are never shed, because a call that cannot be ended is the
+failure this exists to prevent.
+
+Watch `session.bufferedBytes` before pushing a continuous stream, and treat a zero as no evidence of
+backpressure rather than proof of an idle socket, because it reads zero when the transport cannot
+report it. See [Call server](/typescript-sdk/call-server#limits).
+
+The avatar tile has its own, tighter budget on the same socket, because a caller forgives a dropped
+frame far more readily than a break in the voice. That one is `TileStream`'s, on
+[The avatar](/typescript-sdk/avatar).
+
+## Inbound audio
+
+`onCallerAudio` hands you the caller's PCM already decoded and already validated: base64 that is not
+canonical is rejected, and so is a payload that is not a whole number of PCM16 samples. A malformed
+frame is dropped by the server with a log line and never reaches your handler.
+
+What you do **not** get is a guarantee of 640 bytes. 20 ms is the nominal frame, and it is what
+arrives on a normal call, but the only invariant the decoder enforces is a non-empty, even number of
+bytes: at least one whole PCM16 sample, and no half sample at the end. Measure with
+`frameDurationMs(pcm)` rather than counting frames, and never index into a caller frame at a fixed
+offset.
+
+## `resamplePcm16(pcm, srcHz, dstHz)`
+
+Linear-interpolation resample of PCM16 mono. Returns the input untouched when the rates match or the
+buffer is empty.
+
+```ts
+import { REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ, resamplePcm16 } from "@komaa/standin-sdk";
+
+const toModel  = resamplePcm16(pcm16k, SAMPLE_RATE_HZ, REALTIME_SAMPLE_RATE_HZ);
+const toCaller = resamplePcm16(pcm24k, REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ);
+```
+
+An odd trailing byte is dropped rather than throwing. A truncated frame is a glitch; an exception in
+the audio path is a dropped call.
+
+The rounding is deliberately fussy, so that the Python and TypeScript SDKs produce byte-identical
+output: `Math.round` for the output length, and `Math.trunc` rather than `Math.floor` when
+interpolating, because Python's `int()` truncates toward zero and the difference is audible between a
+negative and a less-negative sample. The shared conformance vectors assert the two agree.
+
+## `FrameAligner`
+
+Chops arbitrary-length PCM buffers into whole wire frames, carrying the remainder.
+
+<Warning>
+Resampled 24 kHz deltas do not divide evenly into the 640-byte frame. Without a residual, the leftover
+bytes are dropped and every turn loses a few milliseconds at the seams. Over a call that is audible as
+clipped word endings.
+</Warning>
+
+```ts
+import { FrameAligner } from "@komaa/standin-sdk";
+
+const aligner = new FrameAligner();
+
+// arbitrary lengths in, whole 640-byte frames out
+for (const chunk of providerAudio) {
+  for (const frame of aligner.push(chunk)) {
+    await session.sendAudio(frame);
+  }
+}
+
+// end of turn: the residual is real audio, not a fragment to discard
+const tail = aligner.flush();
+if (tail) await session.sendAudio(tail);
+```
+
+| Member | Purpose |
+|---|---|
+| `new FrameAligner(frameBytes?)` | Defaults to `FRAME_BYTES`, 640. Pass another size only when you are aligning to something that is not the StandIn wire. |
+| `push(pcm)` | Add a buffer, return whatever whole frames are now available. |
+| `flush()` | Zero-pad and return the residual at end of turn, or `undefined` when empty. |
+| `reset()` | Drop the residual without emitting it. |
+| `pending` | Bytes currently held back. |
+
+`flush()` pads rather than drops: the tail of the last word matters more than a few milliseconds of
+silence. `reset()` is the barge-in case, where the held-back bytes belong to a turn the caller just
+interrupted and must never be played.
+
+### The remainder problem, in numbers
+
+A 24 kHz provider does not hand you round numbers, and whether a chunk divides cleanly is luck:
+
+| From the provider, at 24 kHz | Resampled to 16 kHz | Whole 640-byte frames | Left over | Lost per seam without a residual |
+|---|---|---|---|---|
+| 9600 bytes | 6400 bytes | 10 | 0 bytes | nothing |
+| 7000 bytes | 4666 bytes | 7 | 186 bytes | 5.8 ms |
+
+Five milliseconds sounds like nothing. It is not one seam: it is one per chunk, for the whole call,
+and it always lands at the end of the audio rather than in the middle, which is why it is heard as
+clipped word endings rather than as a glitch. The aligner carries those 186 bytes into the next push
+and they are never lost at all.
+
+### Resetting on a barge-in
+
+Three steps, and the order is the whole point:
+
+```ts
+await session.cancelPlayback();  // 1. flush what the service still holds
+provider.cancelResponse();       // 2. stop the model generating more
+aligner.reset();                 // 3. drop the residual of the interrupted turn
+```
+
+Do 2 before 1 and the model stops while the bot keeps talking for the length of the buffer. Skip 3
+and the first frame of the caller's **next** answer is prefixed with the last few milliseconds of the
+turn they interrupted, which sounds like the agent stammering.
+
+## A complete realtime leg
+
+Both directions of a 24 kHz provider, with the interrupt handled properly:
+
+```ts
+import {
+  FrameAligner,
+  REALTIME_SAMPLE_RATE_HZ,
+  SAMPLE_RATE_HZ,
+  frameDurationMs,
+  resamplePcm16,
+  type CallSession,
+} from "@komaa/standin-sdk";
+
+class RealtimeHandler {
+  #call: CallSession | undefined;
+  #aligner = new FrameAligner();
+  #playbackEndAt = 0;
+
+  async onStart(session: CallSession) {
+    this.#call = session;
+
+    // model -> caller: 24 kHz down to the wire's 16 kHz, then whole frames only
+    provider.on("audio", async (pcm24k: Buffer) => {
+      const pcm16k = resamplePcm16(pcm24k, REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ);
+      this.#playbackEndAt = Math.max(this.#playbackEndAt, Date.now()) + frameDurationMs(pcm16k);
+      for (const frame of this.#aligner.push(pcm16k)) {
+        await session.sendAudio(frame);
+      }
+    });
+
+    // end of turn: send the padded residual so the last word is not clipped
+    provider.on("turnEnd", async () => {
+      const tail = this.#aligner.flush();
+      if (tail) await session.sendAudio(tail);
+    });
+
+    // barge-in: flush the service FIRST, then stop the model, then drop the residual
+    provider.on("callerStartedSpeaking", async () => {
+      await session.cancelPlayback();
+      provider.cancelResponse();
+      this.#aligner.reset();
+    });
+  }
+
+  // caller -> model: the wire's 16 kHz up to what the model speaks
+  async onCallerAudio(pcm: Buffer) {
+    provider.sendAudio(resamplePcm16(pcm, SAMPLE_RATE_HZ, REALTIME_SAMPLE_RATE_HZ));
+  }
+}
+```
+
+## Three traps worth naming
+
+1. **Do not track timestamps yourself.** `sendAudio` owns the sequence number and the outbound
+   timeline. Advancing your own clock and sending it is how timelines end up jumping backwards after
+   an audio source is swapped.
+2. **Do not drop the residual at end of turn.** That is the clipped-word-endings bug, and it is subtle
+   enough to survive a demo and fail in production.
+3. **Do not reuse one `FrameAligner` across calls.** It carries per-turn state. One per call, and
+   `reset()` on every interrupt.
+
+## The same bytes in both SDKs
+
+`standin/audio.py` and `src/audio.ts` are the same constants, the same linear resample and the same
+carry-the-remainder aligner, and the shared conformance vectors assert that both produce identical
+output for the same input. The rounding above is a property of the pair rather than of this language:
+it is written the way it is so that Python and TypeScript agree, not because either idiom is nicer.
+
+That matters in practice because a Python worker and a TypeScript worker can share one StandIn
+identity, and a call recorded from one has to be indistinguishable from a call recorded from the
+other.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Turn-taking" icon="waveform-lines" href="/typescript-sdk/voice">
+    The segmenter, WAV handling and paced playback, for an agent that is not a realtime model.
+  </Card>
+  <Card title="Realtime providers" icon="bolt" href="/typescript-sdk/realtime-providers">
+    The playout clock, and why the agent answers itself on a speakerphone.
+  </Card>
+  <Card title="Call handler" icon="plug" href="/typescript-sdk/call-handler">
+    `sendAudio`, `cancelPlayback` and the session that owns the timeline.
+  </Card>
+  <Card title="Checking the install" icon="stethoscope" href="/typescript-sdk/checking-the-install">
+    Prove audio made the round trip without placing a real call.
+  </Card>
+</CardGroup>

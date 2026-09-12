@@ -1,0 +1,129 @@
+---
+title: "Call tools"
+description: "One set of call capabilities, declared in every provider's own JSON, in the StandIn TypeScript SDK."
+keywords: ["AI agent hang up Microsoft Teams call", "voice agent function calling", "tool schema per provider", "agent tool dispatch"]
+icon: "wrench"
+---
+
+A voice model can talk. What it cannot do, unless you tell it, is hang up, put a picture on its own video tile, react with an expression, or look at what the caller is showing.
+
+Those are properties of being on a Microsoft Teams call, not of any provider, so they live in the SDK. Every plugin gets the same set, and a caller gets the same agent whichever provider answers.
+
+## The capabilities
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `end_call` | none | Hang up. |
+| `express` | `emotion` | Show an emotion on the avatar's face. |
+| `show_image` | `url`, `caption?`, `display?` | Put a picture on the bot's video tile. |
+| `look` | `source?`, `question?` | Look at the caller's camera or screen share. |
+| `look_back` | `question?` | Look again at something already moved past. Recorded calls only. |
+
+`display` is `"fullscreen"` or `"overlay"`, and it is a schema `enum` rather than a list written into the description, because a model obeys a schema enum far more reliably than the same choice spelled out in prose. [Vision and the avatar](/typescript-sdk/vision#fullscreen-or-beside-your-face) covers which to reach for.
+
+The descriptions are written **for a model**. They say when to reach for a tool rather than what the code does, because that sentence is the only thing the model reads before deciding.
+
+`show_page` is deliberately **not** in that list. It needs a renderer, and a deployment with none would still be telling every model it can show a web page, promising the caller and then apologising on every call. An absent tool is honest; a broken one is not. A plugin that does have a renderer registers `SHOW_PAGE_TOOL` itself.
+
+## More tools the SDK ships
+
+None of these are built in either, for the same reason: an agent with nothing behind a tool should not be told it has one. Each is a `ToolSpec` ready to `register`.
+
+| Tool spec | What it needs behind it | Page |
+|---|---|---|
+| `SHOW_PAGE_TOOL` | A page renderer on `VisionTools`. | [Vision and the avatar](/typescript-sdk/vision#showing-a-web-page) |
+| `CONSULT_TOOL` | A `Consultant`, so the slow agent can be asked while the caller waits. | [Consulting](/typescript-sdk/consulting) |
+| `BACKGROUND_TASK_TOOL` | A `BackgroundTasks` store, so a promise outlives the call. | [Consulting](/typescript-sdk/consulting) |
+| `MINUTES_TOOL` | A resolved minutes target, because whether there is anywhere to post depends on the call. | [Meeting recap](/typescript-sdk/minutes) |
+| `CALL_BACK_TOOL`, `CHAT_CALLBACK_TOOL` | An outbound lane and its allowlist. | [Reaching people](/typescript-sdk/reaching-people) |
+
+## Declaring them
+
+Every provider invented its own JSON for "here is a function you may call", so `schemas` renders one list in the shape yours wants.
+
+```ts
+import { CallTools, VisionTools } from "@komaa/standin-sdk";
+
+const tools = new CallTools(session, { vision: new VisionTools(session, { describer }) });
+agent.declare(tools.schemas("flat"));
+```
+
+`vision` is the only option, and it is optional: leave it out and `CallTools` builds a `VisionTools`
+of its own. Pass one when you want to give it a describer, a renderer or a budget, which is nearly
+always, because a `VisionTools` with no describer can put pictures up but cannot say what it sees.
+The instance is on `tools.vision` afterwards either way.
+
+| Dialect | Shape | Who takes it |
+|---|---|---|
+| `flat` | `{name, description, parameters}` | Deepgram's Settings, ElevenLabs' client tools |
+| `openai` | the same, tagged `type: "function"` | the Realtime API |
+| `anthropic` | `{name, description, input_schema}` | the Messages API |
+
+An unknown dialect falls back to `flat` rather than throwing. A tool a model never sees is a worse outcome than a shape one provider happens to also accept, and a crash at connect time helps nobody.
+
+## Running them
+
+Translate your provider's tool-call frame into a name and an object, and hand it over:
+
+```ts
+const result = await tools.dispatch(name, params);   // never throws
+```
+
+**Dispatch never throws.** It returns a sentence, because the result goes back to a model that will read it out. "I could not show that because the image was too large" is worth something to a model; a stack trace is not.
+
+When your provider's tool-result frame also carries an error flag, use `run` instead:
+
+```ts
+const outcome = await tools.run(name, params);
+agent.sendResult(callId, outcome.text, !outcome.ok);
+```
+
+`ok` is false only when the SDK **knows** the tool did not do what it was asked: a missing or malformed argument, a rejected value, a handler that threw, or a name no tool answers. It is not a verdict on the vision tools, which answer in sentences by design, so "there is nothing to look at" comes back as ok with the reason in the text.
+
+## Tools of your own
+
+Your own tools go in the same place, so the model sees one list:
+
+```ts
+tools.register(
+  {
+    name: "open_ticket",
+    description: "Use this when the caller reports a fault that needs following up.",
+    parameters: { summary: { type: "string", description: "What is wrong, in one line." } },
+    required: ["summary"],
+  },
+  openTicket,
+);
+```
+
+The handler may return a string or a promise of one, and what it returns is what the model is told. Keep it fast: the caller is listening to silence while it runs.
+
+A tool of your own may not shadow a built-in. That is refused when you register it rather than at the first call, because a shadowed `end_call` is an agent that has quietly lost the ability to hang up, and that is not something to discover mid-conversation.
+
+<Note>
+  The provider plugins already do all of this. Reach for `CallTools` when you are writing a plugin of your own, or adding capabilities to a handler you wrote yourself.
+</Note>
+
+## Whether to answer at all
+
+A tool decides what an agent can do. In a meeting, the prior question is whether it should say
+anything at all, and the SDK ships that separately: `GroupGate` and the wake-phrase matching around
+it. It is inert on a 1:1 call, so a plugin that never configures a phrase behaves exactly as it did
+before. See [Group calls](/typescript-sdk/group-calls).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Vision and the avatar" icon="eye" href="/typescript-sdk/vision">
+    What `look`, `look_back` and `show_image` actually do.
+  </Card>
+  <Card title="The avatar" icon="face-smile" href="/typescript-sdk/avatar">
+    What `express` puts on the face, and the lip-sync beside it.
+  </Card>
+  <Card title="Consulting" icon="hourglass" href="/typescript-sdk/consulting">
+    The two tools that hand real work to a second agent.
+  </Card>
+  <Card title="Call handler" icon="plug" href="/typescript-sdk/call-handler">
+    The session every one of these tools is bound to.
+  </Card>
+</CardGroup>

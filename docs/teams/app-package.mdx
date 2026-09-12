@@ -1,0 +1,123 @@
+---
+title: "Get the Microsoft Teams app package"
+description: "Download the generated Microsoft Teams app package (manifest zip) from StandIn, or build it yourself from the example manifest."
+keywords: ["Microsoft Teams app manifest example","Microsoft Teams app package zip","manifest.json","Microsoft Teams Developer Portal","validDomains","supportsCalling"]
+---
+
+Part 2 of the [Microsoft Teams setup](/teams/overview). The app package is what makes your bot appear (and be
+callable) in Microsoft Teams: a zip with a `manifest.json` and two icons. Every SDK, plugin and legacy bridge
+uses the **same package**: it describes the bot identity, not the agent behind it.
+
+## Download it from StandIn (recommended)
+
+<Card title="Download your Microsoft Teams app package" icon="download" href="https://standin.komaa.com">
+  Your StandIn dashboard generates a **per-identity** app package with your `botId` and valid
+  domains already filled in. Open your identity and click **Download Microsoft Teams app package (.zip)**, then continue to
+  [Upload to Microsoft Teams](/teams/publish).
+</Card>
+
+<Note>
+  The generated package contains **no secrets** - a Microsoft Teams manifest is public metadata (IDs, names,
+  icons). Anyone who obtains it can still only reach the bot your tenant consented to.
+</Note>
+
+If you use the generated package you can skip straight to [uploading](/teams/publish). The rest of
+this page is for building or auditing the package yourself.
+
+## Example manifest
+
+The example uses obvious placeholders - **do not publish with these values.**
+
+```json manifest.json
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.23/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.23",
+  "version": "1.0.0",
+  "id": "00000000-0000-0000-0000-000000000000",
+  "name": { "short": "StandIn", "full": "StandIn - Microsoft Teams Voice & Video AI" },
+  "developer": {
+    "name": "Komaa",
+    "websiteUrl": "https://standin.komaa.com",
+    "privacyUrl": "https://standin.komaa.com/privacy",
+    "termsOfUseUrl": "https://standin.komaa.com/terms"
+  },
+  "description": {
+    "short": "Voice & video AI for Microsoft Teams - converse, see the caller, appear as an avatar.",
+    "full": "StandIn turns your Microsoft Teams bot into a Conversational Video Interface (CVI): callers talk to your AI in real time, share camera and screen, and see a lip-synced avatar on the bot tile. Subscribe at standin.komaa.com, connect your own Azure bot, and pair it with any of the open-source agent bridges."
+  },
+  "icons": { "outline": "outline.png", "color": "color.png" },
+  "accentColor": "#16A34A",
+  "bots": [
+    {
+      "botId": "11111111-1111-1111-1111-111111111111",
+      "scopes": ["personal", "team", "groupChat"],
+      "isNotificationOnly": false,
+      "supportsCalling": true,
+      "supportsVideo": true,
+      "supportsFiles": true
+    }
+  ],
+  "validDomains": [],
+  "webApplicationInfo": { "id": "11111111-1111-1111-1111-111111111111" },
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        { "name": "ChannelMessage.Read.Group", "type": "Application" },
+        { "name": "ChannelMessage.Send.Group", "type": "Application" },
+        { "name": "Member.Read.Group", "type": "Application" },
+        { "name": "Owner.Read.Group", "type": "Application" },
+        { "name": "ChannelSettings.Read.Group", "type": "Application" },
+        { "name": "TeamMember.Read.Group", "type": "Application" },
+        { "name": "TeamSettings.Read.Group", "type": "Application" },
+        { "name": "ChatMessage.Read.Chat", "type": "Application" }
+      ]
+    }
+  }
+}
+```
+
+Key bot fields: **`supportsCalling: true`** (required for voice) and **`supportsVideo: true`**
+(required for the CVI avatar tile). The `resourceSpecific` block is **per-team consent (RSC)** -
+granted when the app is installed in a team; it does **not** replace the tenant-wide
+[Graph permissions](/teams/azure-bot#8-grant-graph-permissions).
+
+Official reference: [Microsoft Teams app manifest schema](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema).
+
+## Placeholders
+
+| Field | Example value | Replace with |
+|---|---|---|
+| `id` | `00000000-…-000000000000` | A **new random GUID** for the app package (unique per listing; not the bot ID). |
+| `bots[].botId` | `11111111-…-111111111111` | Your **Entra application (client) ID** (same as the Azure Bot's `MicrosoftAppId`). |
+| `webApplicationInfo.id` | same as `botId` | **Must equal `botId`** for a standard single-app bot. |
+| `validDomains` | `[]` | Your **StandIn host**, e.g. `["standin.komaa.com"]`. |
+
+Generate GUIDs with `uuidgen` (macOS/Linux), `[guid]::NewGuid()` (PowerShell), or
+[uuidgenerator.net](https://www.uuidgenerator.net/).
+
+## Icons
+
+The package needs a **color icon** (192×192 px, `color.png`) and an **outline icon** (32×32 px,
+transparent, `outline.png`). In the [Developer Portal](https://dev.teams.microsoft.com/) they upload
+under **Branding**; in a manual zip they sit next to the manifest.
+
+## Packaging it manually
+
+Put the three files at the **root** of the archive (Microsoft Teams rejects a package where they sit in a
+subfolder):
+
+```
+msteams.zip
+├── manifest.json
+├── color.png
+└── outline.png
+```
+
+<Warning>
+  Zip the **files themselves**, not the containing folder - `msteams/manifest.json` inside the zip
+  will be rejected. Bump `version` whenever you republish the package.
+</Warning>
+
+Official reference: [Create a Microsoft Teams app package](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/build-and-test/apps-package).
+
+Next: [Upload to Microsoft Teams and go live](/teams/publish).

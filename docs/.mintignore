@@ -1,0 +1,13 @@
+# Mintlify automatically ignores these files and directories:
+# .git, .github, .claude, .agents, .idea, node_modules,
+# README.md, LICENSE.md, CHANGELOG.md, CONTRIBUTING.md
+
+# Draft content
+drafts/
+*.draft.mdx
+
+# Bridges that were never launched. Dropping a page from docs.json navigation is
+# NOT enough on its own: Mintlify still builds an unlisted page, so it stays
+# reachable by direct URL and findable in site search. This is the only thing
+# that actually keeps them off the published site.
+legacy/_hidden/

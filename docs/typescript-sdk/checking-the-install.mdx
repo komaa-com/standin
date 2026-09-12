@@ -1,0 +1,236 @@
+---
+title: "Checking the install"
+description: "Ring this worker's own handler on loopback and prove audio made the round trip, without a provider bill, a public tunnel or a Microsoft tenant, in the StandIn TypeScript SDK."
+keywords: ["standin smoke check", "runSmoke", "verify voice agent install", "test voice agent without a call", "SyntheticCall loopback"]
+icon: "stethoscope"
+---
+
+Every plugin has to answer one question before anybody trusts it with a real call: does this actually work here? Until now the only way to find out was to place a real call, which costs a provider bill, a public tunnel, a Microsoft Teams tenant and somebody's afternoon.
+
+`runSmoke` answers it on loopback in under a second. It binds an ephemeral listener, connects a real client that speaks the real call wire, streams a few frames of silence, and reports what came back.
+
+```ts
+import { runSmoke, smokeReport } from "@komaa/standin-sdk";
+
+import { MyHandler } from "./myHandler.js";
+
+const result = await runSmoke(() => new MyHandler());
+console.log(smokeReport(result));
+process.exit(result.ok ? 0 : 1);
+```
+
+`handlerFactory` is the same `() => CallHandler` that [`CallServer`](/typescript-sdk/call-server) takes, called once. It is called with no arguments, so a handler that needs configuration closes over it in the arrow function.
+
+<Note>
+  The printer is on the package as **`smokeReport`**, not `report`. The module names the function `report` and the package renames it on the way out, so `import { report } from "@komaa/standin-sdk"` does not resolve. `SyntheticCall`, `runSmoke`, `SmokeCheck` and `SmokeResult` keep their own names.
+</Note>
+
+## What it prints
+
+```text
+standin: ok
+  ok   secret (generated for this run)
+  ok   listener (127.0.0.1:55064/msteams/calling)
+  ok   call (10 frames in 235 ms)
+  ok   audio (10 frames came back)
+```
+
+And when the handler never sent anything back:
+
+```text
+standin: NOT ok
+  ok   secret (generated for this run)
+  ok   listener (127.0.0.1:55073/msteams/calling)
+  ok   call (4 frames in 93 ms)
+  FAIL audio (0 frames came back)
+       without it: the caller would hear nothing
+```
+
+Every failed check prints what stops working without it. A report that names a missing surface and not the consequence sends the operator to the source to find out whether it matters.
+
+`smokeReport` returns the string rather than printing it, so a plugin can put it in a log line, a tool result or an HTTP response. When the run recorded an `error`, a final `  error: ...` line follows the checks.
+
+## The four checks
+
+They run in this order, and each one is the next thing that breaks in the field.
+
+| Check | What it proves | What the failure costs |
+|---|---|---|
+| `secret` | A credential exists for this run. | nothing could authenticate |
+| `listener` | The worker bound its socket and has a call path. The detail is the bound address. | no call could ever reach this worker |
+| `call` | Connect, handshake, `session.start`, the frame loop and hang-up all completed. | a real call would fail the same way |
+| `audio` | Frames came back out of the handler. | the caller would hear nothing |
+
+All four are mandatory, and `result.ok` is true only when every mandatory check passed.
+
+**`ok` is never true when nothing echoed.** The whole point of the run is that audio made the round trip, so a run that proved nothing must not read as a pass. A listener that binds, authenticates and then says nothing is exactly the install people ship by accident.
+
+The run sends `recording.status: active` before the first frame. Handlers commonly gate their output on the call being recorded, and without it a recording-gated handler stays silent and the run reports a false negative.
+
+Frames are PCM16 mono at 16 kHz, 20 ms each, which is `FRAME_BYTES` (640) at the cadence a real call arrives at. `frames` defaults to 10.
+
+If the listener cannot bind, the run returns there and then with two checks, a failed `listener` carrying the bind error, and `echoFrames` at 0. There is nothing left to ring.
+
+The two results are plain readonly shapes:
+
+```ts
+interface SmokeResult {
+  readonly checks: SmokeCheck[];
+  readonly echoFrames: number;
+  readonly error?: string;
+  readonly ok: boolean;
+}
+
+interface SmokeCheck {
+  readonly name: string;
+  readonly ok: boolean;
+  readonly detail?: string;
+  readonly cost?: string;
+  readonly required?: boolean;
+}
+```
+
+## It never borrows your configuration
+
+The run generates its own connection secret, `randomBytes(16).toString("hex")`, for that run only. It never reads `STANDIN_SECRET`.
+
+Two reasons, and both are real failures rather than tidiness.
+
+A fixed string would be a predictable credential on a live listener. The check is meant to be safe to run anywhere, including on a host that is answering calls.
+
+Borrowing the operator's secret makes the run pass or fail for reasons that have nothing to do with the wire, and it makes the check impossible to run before the secret is configured. That is exactly when people run it.
+
+## Loopback, on port 0
+
+The listener is built with `host: "127.0.0.1"` and `port: 0`, and the port it actually got is read back from `server.port` after it is listening.
+
+Loopback because a verification run has no business being reachable from the network. Port `0` because the alternative is picking a free port in advance with a throwaway socket, which races whoever binds it next. Two runs in the same CI job, or a run next to a real listener, and the loser fails for a reason that has nothing to do with the install.
+
+The call path is the one this worker is configured to serve, so the address in the report is the real one a call would arrive on.
+
+## Nothing that delivers is started
+
+<Warning>
+  **This is the most important property on the page.** No pending-message sweep, no no-answer reaper, no outbound caller, no chat lane. Nothing that delivers is started, and the listener's own stale-call reaper is off for the run (`staleCallReaperMs: 0`).
+
+  A verification command that quietly resumed durable jobs would place real calls and post real messages as a side effect of somebody checking an install.
+</Warning>
+
+Durable work is durable on purpose. Parked messages, background-task promises and unanswered outbound legs all survive a restart, because the person they are for is still owed the answer. That is correct for a worker coming up, and completely wrong for a check somebody ran to find out whether an install works. `runSmoke` starts a listener and a handler, and nothing else.
+
+The listener is closed with `aclose()` in a `finally`, on every path including the failing ones, so a run leaves nothing bound behind it.
+
+## A plugin's own checks
+
+`extra` runs after the call and resolves to more checks, so a plugin can prove its own surfaces in the same report.
+
+```ts
+import { runSmoke, type SmokeCheck } from "@komaa/standin-sdk";
+
+async function myChecks(): Promise<SmokeCheck[]> {
+  return [
+    { name: "model", ok: await modelReachable(), cost: "the agent could not answer" },
+    {
+      name: "browser",
+      ok: await browserReachable(),
+      detail: "no display",
+      cost: "show_page would apologise",
+      required: false,
+    },
+  ];
+}
+
+const result = await runSmoke(() => new MyHandler(), 10, myChecks);
+```
+
+**Mandatory unless declared advisory.** Leave `required` off and the check counts towards `ok`; set `required: false` for anything the call itself survives without. A degraded extra is worth reporting and is not worth failing an install over.
+
+Give every check a `cost`. It is the sentence printed under a failure, and it is what tells the operator whether to act now or after lunch.
+
+```text
+  FAIL browser (no display)
+       without it: show_page would apologise
+```
+
+An `extra` that rejects is recorded, not fatal. The report gains a non-required `plugin checks` entry carrying the error text, because a broken check must not take down the report of the call that did work.
+
+## Pointing one at your own listener
+
+`SyntheticCall` is the client `runSmoke` uses. It is exported because a plugin with its own listener may want to point one at that instead.
+
+```ts
+import { SyntheticCall } from "@komaa/standin-sdk";
+
+const callId = "smoke-local";
+const call = new SyntheticCall(
+  `ws://127.0.0.1:${port}/msteams/calling/${callId}`,
+  secret,
+  callId,
+  10,
+);
+await call.run();
+console.log(call.echoFrames);
+```
+
+`run()` connects, greets, streams, hangs up, and rejects on anything that fails. `echoFrames` is how many audio frames came back. The constructor takes `url`, `secret`, `callId`, then `frames` (10, clamped to at least 1) and `connectTimeoutMs` (5000).
+
+Three things it does that a hand-rolled client usually gets wrong:
+
+- **The handshake is signed freshly for each connect.** The listener enforces single use inside the freshness window, so a retry that reused the headers would loop on 401 and read as a wrong secret.
+- **The `callId` in `session.start` is identical to the one in the path.** A start that disagrees with the authenticated path is refused, and the refusal reads as a wire fault.
+- **The message listener is attached before the socket opens.** An echo that arrives while the run is still sending is counted, and nothing blocks the 20 ms cadence, which would otherwise make the call look idle to the server's watchdogs. A frame it cannot parse is not counted as an echo.
+
+The socket is closed in a `finally`, on every path. An error path that skipped the close leaks a socket per run inside a long-lived host that exposes the check.
+
+<Note>
+  The client lives in the SDK, next to the wire it speaks, deliberately. A copy kept inside a plugin drifts, and the copy that used to exist kept passing against a call path that no longer existed. That is the exact failure a smoke check is for.
+</Note>
+
+## Timeouts
+
+The whole run is bounded at `timeoutMs`, 15000 by default, and the connect at 5000. A listener that accepts and then stops talking would otherwise hang CI, and hang a status tool call for ever.
+
+A run that times out is a recorded failure, not a hang. The `call` check fails with `the call did not finish within 15000 ms`, and the same sentence becomes `result.error`.
+
+```ts
+function runSmoke(
+  handlerFactory: HandlerFactory,
+  frames?: number, // 10
+  extra?: () => Promise<SmokeCheck[]>,
+  timeoutMs?: number, // 15000
+): Promise<SmokeResult>;
+```
+
+## In your own command
+
+Wire it to a subcommand and exit on `result.ok`, so CI fails on a bad install.
+
+```ts
+#!/usr/bin/env node
+import { runSmoke, smokeReport } from "@komaa/standin-sdk";
+
+import { MyHandler } from "./myHandler.js";
+
+const result = await runSmoke(() => new MyHandler(), 4);
+console.log(smokeReport(result));
+process.exit(result.ok ? 0 : 1);
+```
+
+It needs no network, no tenant and no credentials, so it also belongs in the test suite:
+
+```ts
+import { runSmoke } from "@komaa/standin-sdk";
+import { expect, it } from "vitest";
+
+import { MyHandler } from "./myHandler.js";
+
+it("answers a call here", async () => {
+  const result = await runSmoke(() => new MyHandler(), 4);
+  expect(result.ok).toBe(true);
+  expect(result.echoFrames).toBeGreaterThan(0);
+});
+```
+
+Four frames is enough to prove a round trip and keeps the test well under a second. Raise it when your handler needs more audio before it says anything.
+
+The Python SDK has the same module, check for check: see [Checking the install](/python-sdk/checking-the-install) for the `run_smoke` form.

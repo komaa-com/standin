@@ -1,0 +1,213 @@
+---
+title: "Audio"
+description: "resample_pcm16 and FrameAligner in the StandIn Python SDK: the 16 kHz wire, 24 kHz realtime models, and why the remainder matters."
+keywords: ["resample_pcm16", "FrameAligner", "pcm16 16khz teams", "realtime 24khz resample", "barge-in reset"]
+icon: "waveform"
+---
+
+The StandIn wire is PCM 16 kHz, 16-bit, mono, little-endian in both directions. Almost nothing else is.
+
+Realtime speech-to-speech models speak 24 kHz. Most TTS vendors emit 22.05 or 24 kHz. None of them chunk on the wire's frame boundary. So every plugin that is not a pure passthrough ends up writing the same two things:
+
+- a resampler, because the rates differ
+- a frame aligner, because a resampled buffer does not divide evenly into the wire's 640-byte frame, and dropping the remainder clips the end of every turn
+
+They live in the SDK rather than in each plugin because they are properties of the **wire**, not of any framework. That is the same reason the sequence number and the outbound timeline live in `CallServer`. A plugin that has to reimplement them is a plugin the SDK failed.
+
+Both helpers are dependency-free on purpose. Speech at these rates does not need a windowed-sinc filter, and the alternative is putting NumPy or SciPy on the critical path of every audio frame of every call.
+
+## Constants
+
+```python
+from standin import (
+    BYTES_PER_SAMPLE,        # 2, 16-bit mono
+    FRAME_BYTES,             # 640
+    FRAME_MS,                # 20
+    REALTIME_SAMPLE_RATE_HZ, # 24000
+    SAMPLE_RATE_HZ,          # 16000
+    NUM_CHANNELS,            # 1
+)
+```
+
+| Constant | Value | What it is |
+|---|---|---|
+| `SAMPLE_RATE_HZ` | `16000` | The wire rate, both directions. |
+| `NUM_CHANNELS` | `1` | Mono. |
+| `BYTES_PER_SAMPLE` | `2` | 16-bit. |
+| `FRAME_MS` | `20` | The nominal frame StandIn sends. |
+| `FRAME_BYTES` | `640` | 20 ms of PCM16 at 16 kHz, so 320 samples. |
+| `REALTIME_SAMPLE_RATE_HZ` | `24000` | What the realtime speech-to-speech models speak. Named here rather than in a plugin because it is the **ratio** that forces the residual buffer, and that is an audio concern rather than a provider one. |
+
+## frame_duration_ms
+
+```python
+from standin import frame_duration_ms
+
+ms = frame_duration_ms(pcm)  # duration of a PCM16 mono buffer
+```
+
+Use this for a playout clock rather than counting frames. Outbound chunk lengths are not fixed, so a frame count drifts against real time.
+
+## pcm16_rms
+
+```python
+from standin import pcm16_rms
+
+level = pcm16_rms(pcm)  # 0.0 to 1.0
+```
+
+Root-mean-square amplitude of a PCM16 mono buffer, normalised to 0.0 - 1.0. How loud a frame is.
+
+It is here rather than in a plugin because three separate things want it and each plugin that wanted it had been writing it again: the [echo guard](/python-sdk/realtime-providers#the-agent-answering-itself) testing whether in-window sound is a real barge-in, the [utterance segmenter](/python-sdk/voice#one-utterance-per-phrase) deciding what counts as speech at all, and any handler doing its own level check.
+
+That shared definition is the point. **A level threshold only means something against the same normalisation everywhere**, so `DEFAULT_SPEECH_RMS` (0.02) and `ECHO_BARGE_IN_RMS` (0.04) are both numbers on this scale, and a threshold you tune in one place reads the same in the other.
+
+Dependency-free for the same reason the resampler is: this runs on every inbound frame of every call, and NumPy on that path buys microseconds at the cost of a wheel on every deployment. An odd trailing byte is dropped rather than raising.
+
+## resample_pcm16
+
+```python
+from standin import REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ, resample_pcm16
+
+# caller audio, 16 kHz on the wire, into a 24 kHz model
+to_model = resample_pcm16(pcm, SAMPLE_RATE_HZ, REALTIME_SAMPLE_RATE_HZ)
+
+# model audio, 24 kHz, back onto the wire
+to_wire = resample_pcm16(pcm_24k, REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ)
+```
+
+Linear interpolation over PCM16 mono. Equal rates return the input unchanged, and empty input returns empty, so it is safe to call unconditionally.
+
+An odd trailing byte is dropped rather than raising. A truncated frame is a glitch; a raised exception in the audio path is a dropped call.
+
+## The remainder problem
+
+This is the part that is easy to miss, and it is audible.
+
+At 24 kHz to 16 kHz the ratio is 2:3, so a chunk only lands on a 640-byte boundary by luck. Take a realistic provider chunk:
+
+| Step | Bytes |
+|---|---|
+| Model chunk at 24 kHz | 9600 |
+| Resampled to 16 kHz | 6400 |
+| Whole 640-byte frames | 10 frames, 6400 bytes |
+
+That one divides cleanly. Now the chunk after it, arriving at 7000 bytes of 24 kHz audio, resamples to 4666 bytes: seven whole frames and a 186-byte remainder. Send the seven and drop the remainder and you have lost about 5.8 ms. Do that at every chunk seam for a whole turn and the word endings go clipped and clicky.
+
+`FrameAligner` exists so the remainder is carried instead of dropped.
+
+## FrameAligner
+
+```python
+from standin import FrameAligner
+
+aligner = FrameAligner()
+
+for chunk in provider_audio:            # arbitrary lengths
+    for frame in aligner.push(chunk):   # whole 640-byte frames
+        await session.send_audio(frame)
+
+tail = aligner.flush()                  # end of turn
+if tail is not None:
+    await session.send_audio(tail)
+```
+
+| Member | Does |
+|---|---|
+| `push(pcm)` | Adds a buffer and returns whatever whole frames are now available, keeping the rest. |
+| `flush()` | Zero-pads and returns the residual at end of turn, or `None` when empty. |
+| `reset()` | Drops the residual without emitting it. |
+| `pending` | Bytes currently held back, waiting for a whole frame. |
+
+`flush()` pads rather than drops, because the tail of the last word matters more than a few milliseconds of silence.
+
+`FrameAligner(frame_bytes=...)` takes a different frame size if you need one, but the wire's frame is 640 bytes and there is rarely a reason to change it.
+
+## reset on barge-in
+
+<Warning>
+Call `reset()` when the caller interrupts. The bytes the aligner is holding back belong to the turn that was just interrupted. Flushing them instead replays a fragment of the abandoned answer after the silence, which is worse than the interruption the caller was trying to make.
+</Warning>
+
+The full barge-in sequence, in order:
+
+```python
+async def _on_barge_in(self) -> None:
+    await self._call.cancel_playback()     # un-send what StandIn still holds
+    await self._client.cancel_response()   # stop the model generating more
+    self._aligner.reset()                  # drop the partial frame of the dead turn
+```
+
+`cancel_playback()` goes first because it is the part the caller can hear. See [Barge-in](/python-sdk/call-handler#barge-in-and-cancel-playback).
+
+## A complete outbound path
+
+```python
+from standin import (
+    REALTIME_SAMPLE_RATE_HZ,
+    SAMPLE_RATE_HZ,
+    FrameAligner,
+    resample_pcm16,
+)
+
+
+class Playout:
+    """Provider audio at 24 kHz, whole 16 kHz frames on the wire."""
+
+    def __init__(self, session) -> None:
+        self._session = session
+        self._aligner = FrameAligner()
+
+    async def on_provider_audio(self, pcm_24k: bytes) -> None:
+        pcm = resample_pcm16(pcm_24k, REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ)
+        for frame in self._aligner.push(pcm):
+            await self._session.send_audio(frame)
+
+    async def on_turn_done(self) -> None:
+        # The residual is real audio: pad it, do not drop it.
+        tail = self._aligner.flush()
+        if tail is not None:
+            await self._session.send_audio(tail)
+
+    async def on_barge_in(self) -> None:
+        await self._session.cancel_playback()
+        self._aligner.reset()
+```
+
+One aligner per call, not one per turn: it carries state across chunks and `reset()` is what clears it.
+
+## Agent audio can be dropped
+
+Everything above gets whole frames onto the wire. The wire can still refuse them.
+
+When the socket has more than 1 MB (`MAX_AUDIO_BUFFER_BYTES`) unflushed, `send_audio` advances the timeline and returns **without sending**, and logs at most once every five seconds. The caller hears a gap rather than the call wedging, and the timeline still advances because a dropped frame is a gap in what they hear, not a rewind. Control frames are never shed: a call that cannot be ended is the failure this exists to prevent.
+
+Watch `session.buffered_bytes` before pushing a continuous stream, and treat a zero as no evidence of backpressure rather than proof of an idle socket, because it reads zero when the transport cannot report it. See [Backpressure](/python-sdk/call-server#backpressure).
+
+## Inbound audio
+
+`on_caller_audio` receives the caller's PCM already decoded and already validated: base64 that is not canonical is rejected, and so is a payload that is not a whole number of PCM16 samples. A malformed frame is dropped by the server with a log line and never reaches your handler, so no aligner is needed on the way in.
+
+<Warning>
+What you do **not** get is a guarantee of 640 bytes. 20 ms is the nominal frame and it is what arrives on a normal call, but the only invariant is an even byte count. Measure with `frame_duration_ms(pcm)` rather than counting frames, and never index into a caller frame at a fixed offset.
+</Warning>
+
+Resample if your provider wants a different rate, and hand it over without blocking.
+
+```python
+async def on_caller_audio(self, pcm: bytes) -> None:
+    await self._client.append_input(
+        resample_pcm16(pcm, SAMPLE_RATE_HZ, REALTIME_SAMPLE_RATE_HZ)
+    )
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call handler" icon="code" href="/python-sdk/call-handler">
+    Where these helpers sit in a real handler.
+  </Card>
+  <Card title="CallServer" icon="server" href="/python-sdk/call-server">
+    The sequence number and timeline the SDK owns for you.
+  </Card>
+</CardGroup>

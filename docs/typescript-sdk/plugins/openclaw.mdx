@@ -1,0 +1,242 @@
+---
+title: "OpenClaw plugin"
+description: "Connect the realtime voice provider configured in OpenClaw to Microsoft Teams calls through StandIn."
+keywords: ["OpenClaw Microsoft Teams", "OpenClaw voice plugin", "standin-msteams", "realtime voice Microsoft Teams"]
+icon: "robot"
+---
+
+`@komaa/standin-sdk/openclaw` connects the realtime voice provider configured in
+[OpenClaw](https://openclaw.ai) to Microsoft Teams calls through StandIn.
+
+<Note>
+**Scope.** This plugin covers the call path and the voice: a caller converses with the realtime
+provider OpenClaw is configured with, with barge-in, an echo guard and a recording gate. OpenClaw's
+agent consultation, tools, skills and memory are reached from chat today, not from the realtime
+session this plugin drives. [Scope](#scope) has the whole boundary in one list.
+</Note>
+
+## This is a plugin, not a worker you run
+
+There is no `node app.js` here, and there is not supposed to be. The plugin loads **inside** the
+OpenClaw gateway process, declared by its `openclaw.plugin.json`, because it consumes the host's
+realtime speech-to-speech session, its provider registry and its logger, all of which are in-process
+objects.
+
+OpenClaw's external HTTP surface is text-only, so a standalone worker could only use OpenClaw as a
+text brain and bring its own STT and TTS, which is exactly the part this plugin exists to avoid.
+
+The plugin registers one host-managed background service, so OpenClaw's own lifecycle starts the call
+listener at boot and tears it down on shutdown or reload. There is nothing to supervise separately.
+
+## Install
+
+OpenClaw 2026.6.10 or newer. Install the SDK where your gateway can reach it:
+
+```bash
+npm install @komaa/standin-sdk
+```
+
+`openclaw` is an **optional peer** dependency, never a bundled one: the plugin runs inside the
+gateway and consumes the host's own realtime session, provider registry and logger.
+
+OpenClaw does not load a plugin by package specifier. It is handed a **directory** through
+`plugins.load.paths` and discovers what is inside it, so point it at the one inside the package:
+
+```json
+{ "plugins": { "load": { "paths": [
+    "node_modules/@komaa/standin-sdk/dist/plugins/openclaw"
+] } } }
+```
+
+## Configure and restart
+
+Merge this into `~/.openclaw/openclaw.json`, keeping the `plugins.load.paths` entry above:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "standin-msteams": {
+        "enabled": true,
+        "config": {
+          "secret": "sk_standin_REPLACE_ME",
+          "inboundPolicy": "allowlist",
+          "allowFrom": [
+            "00000000-0000-0000-0000-000000000000"
+          ],
+          "inboundGreeting": "Hi, this is your assistant. How can I help?",
+          "callingPort": 9442,
+          "bindAddress": "127.0.0.1",
+          "path": "/msteams/calling",
+          "maxConcurrentCalls": 4,
+          "requireRecordingStatus": false,
+          "realtime": {
+            "provider": "openai",
+            "providers": {
+              "openai": {
+                "apiKey": "sk-REPLACE_ME",
+                "voice": "alloy"
+              }
+            },
+            "instructions": "You are on a Microsoft Teams call. Keep answers short and spoken."
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Then restart the OpenClaw gateway, so the plugin's background service starts the call listener:
+
+```bash
+openclaw gateway
+```
+
+Now expose port `9442` at the `/msteams/calling` path, and register the public `wss://` URL as your
+StandIn identity's agent voice URL. [Expose your agent](/expose) carries the mount command and the
+probes, and it is the only page that does: three spellings of one URL across three pages is what
+caused a live incident here.
+
+Call your StandIn number.
+
+## Configuration reference
+
+| Key | Meaning |
+|---|---|
+| `enabled` | `false` turns the plugin off without uninstalling it. Anything else, including omitting it, leaves it on. |
+| `secret` | The StandIn connection secret. Without it nothing starts. |
+| `callingPort` / `bindAddress` / `path` | Where the call listener binds. Defaults `9442`, `0.0.0.0`, `/msteams/calling`. |
+| `maxConcurrentCalls` | The operator's cap, default 4. Call 5 is refused with `busy`. |
+| `inboundPolicy` / `allowFrom` | Who may call. **Defaults to `disabled`, which refuses everyone.** |
+| `inboundGreeting` | Spoken on pickup. Omit it and the agent waits for the caller to speak first. |
+| `requireRecordingStatus` | Hold caller media until Microsoft Teams reports recording active. |
+| `realtime.provider` / `realtime.providers` | Provider selection and its credentials. |
+| `realtime.instructions` | The system prompt for the call. |
+| `realtime.suppressInputDuringPlayback` | Echo guard on or off. On by default. |
+| `realtime.echoSuppressionWindowMs` | How long after our own audio to keep guarding. Default 600. |
+| `realtime.echoBargeInRms` | How loud caller input must be to break through the guard. Default 0.04. |
+
+The plugin fails closed on the secret. A non-string value coerces to empty rather than to
+`"[object Object]"`, so an unresolved secret reference stops the listener starting instead of arming
+it with a guessable value.
+
+## Who may call
+
+`inboundPolicy` takes `disabled`, `allowlist`, `pairing` or `open`, and an unset or unknown policy
+**refuses**. Defaulting the other way would mean a config typo silently opens your agent to anyone who
+can reach the number.
+
+`allowFrom` takes the caller's **AAD object id**, not their email. It matches on exact id,
+case-insensitive, or on digits-only for a phone number. The id match is what lets a Microsoft Teams caller be
+allowlisted at all: their id is an AAD object id, and phone normalization would reduce it to the empty
+string and match nothing.
+
+An AAD object id is empty for guest and anonymous callers, so an anonymous caller can never be
+allowlisted. That is the intended behaviour.
+
+<Note>
+`pairing` is enforced as a plain allowlist on calls: there are no pairing codes, expirations or
+approval prompts on this path, so the fix for a refused caller is the same as under `allowlist`.
+</Note>
+
+## How a call flows
+
+```text
+caller   16 kHz --> 24 kHz --> OpenClaw realtime session
+model    24 kHz --> 16 kHz --> the caller
+```
+
+StandIn dials `wss://<your-host>/msteams/calling/{callId}` once per call. The SDK answers that dial and
+speaks the wire protocol; the plugin resamples both legs, guards against echo, and handles barge-in.
+
+It carries the three things that make a call feel right rather than merely work:
+
+<AccordionGroup>
+
+<Accordion title="Barge-in">
+`cancelPlayback()` runs **before** the response is cancelled upstream, so the caller stops hearing the
+turn they interrupted rather than listening to the rest of it play out.
+
+There are two triggers. The model truncating its own turn because it heard the caller, and a
+deterministic verbal interrupt matched in code: "stop", "hold on", "never mind". The second exists
+because the model is mid-generation when one arrives, and matching the phrase ourselves is what makes
+the cut feel instant. It only fires while the agent is actually still speaking, because otherwise
+"stop" is just a word in a sentence.
+</Accordion>
+
+<Accordion title="An echo guard">
+On a speakerphone the agent's own voice comes back up the caller leg loudly enough for a realtime
+model's VAD to answer itself, which produces a call where the agent greets, interrupts itself and
+re-greets while the caller has said nothing.
+
+Caller input is dropped while our own audio is still playing out, plus a short window after it,
+unless it is loud enough to be a real interruption. Tune with `echoSuppressionWindowMs` and
+`echoBargeInRms`, or turn it off entirely with `suppressInputDuringPlayback: false`.
+</Accordion>
+
+<Accordion title="A recording gate">
+With `requireRecordingStatus` on, no caller media reaches the model until Microsoft Teams reports recording
+active. This is a Microsoft Media Access API obligation rather than a preference: a bot that processes
+call media before `updateRecordingStatus` goes active is out of policy.
+
+It is off by default because the hosted service can be configured either way, and a gate nobody asked
+for is a call of silence.
+</Accordion>
+
+</AccordionGroup>
+
+## Refusal reasons
+
+The plugin refuses a call in four places, which map to three reason strings. Each one is handed to
+StandIn rather than dropping the socket, so the refusal is visible on the call instead of appearing
+as silence.
+
+| Reason | Meaning |
+|---|---|
+| `realtime-unavailable` | No realtime voice provider resolved, or the provider connect failed. |
+| `not-allowed` | `inboundPolicy` rejected this caller. |
+| `busy` | At `maxConcurrentCalls`. |
+
+Policy and capacity are checked before the call slot is taken, so a refused caller cannot consume
+capacity by dialling repeatedly.
+
+## Checking it works
+
+The gateway logs one line at boot when the listener is up:
+
+```text
+standin-msteams: listening on 0.0.0.0:9442/msteams/calling (max 4 concurrent)
+```
+
+If instead it says nothing started, the `secret` is missing or unresolved. If it warns that no realtime
+voice provider resolved, every call will be refused with `realtime-unavailable`, so set the provider's
+API key. That warning names the configured provider id when there is one, which separates "the key is
+missing" from "no provider is configured at all".
+
+<Note>
+The provider is resolved **once, when the service starts**, not per call. Adding or fixing an API key
+therefore needs the gateway restarted or the plugin reloaded before the next call sees it. The boot
+line above is the confirmation that it did.
+</Note>
+
+## Scope
+
+What this plugin covers, stated once so you can design around it:
+
+- **The call and the voice.** A realtime speech-to-speech session, barge-in, the echo guard, the
+  recording gate and the inbound policy. That is the whole of what a caller talks to.
+- **OpenClaw agent consultation, tools, skills and memory** are reached from chat, not from the
+  realtime session this plugin drives. The prompt the caller talks to is `realtime.instructions`,
+  which is this plugin's own configuration rather than the agent's.
+- **Chat and messages** belong to the SDK's own [chat lane](/typescript-sdk/chat), which is a
+  separate surface with its own page.
+- **Vision, avatar expression, visemes and meeting minutes** are on the StandIn call wire and in the
+  SDK core, and this plugin does not wire any of them into the OpenClaw realtime session. That is a
+  boundary of this plugin, not of the call. Reach for `VisionTools` and `CallTools` directly from a
+  handler of your own if you need them: see [Vision and the avatar](/typescript-sdk/vision),
+  [The avatar](/typescript-sdk/avatar) and [Meeting recap](/typescript-sdk/minutes).
+- **Providers** are the realtime speech-to-speech ones OpenClaw resolves, and the plugin consumes
+  the host's own registry rather than carrying a second list. A provider that offers only speech to
+  text and text to speech is not one this plugin can drive: the whole design rests on the model
+  hearing the caller directly, which is where the latency goes.

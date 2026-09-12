@@ -1,0 +1,102 @@
+---
+title: "Cartesia plugin"
+description: "Answer Microsoft Teams calls with a Cartesia Line agent, using the StandIn Python SDK."
+keywords: ["Cartesia Microsoft Teams", "cartesia voice agent", "standin-sdk", "Microsoft Teams AI call"]
+icon: "waveform"
+---
+
+`standin.plugins.cartesia` puts [Cartesia](https://docs.cartesia.ai/line) on a real Microsoft Teams call. StandIn answers the call and dials your worker; this plugin answers that dial, opens one session per call, and relays the audio both ways.
+
+## Install and run
+
+There is nothing to install beyond the SDK. Cartesia is reached over an ordinary WebSocket, so this plugin adds no dependency and needs no extra.
+
+```bash
+pip install standin-sdk
+```
+
+```bash
+export STANDIN_SECRET=...          # your StandIn connection secret
+export CARTESIA_API_KEY=...
+export CARTESIA_AGENT_ID=...
+python -m standin.plugins.cartesia
+```
+
+Expose port `9442` at the `/msteams/calling` path and register the public `wss://` URL as your StandIn identity's agent voice URL. The full walkthrough is in the [Quickstart](/python-sdk/quickstart), and there is a runnable example at [examples/cartesia-msteams-connector](https://github.com/komaa-com/standin/tree/main/examples/cartesia-msteams-connector).
+
+## The audio format
+
+Audio is pinned to `pcm_16000` in both directions. That is exactly what a Microsoft Teams call carries, so nothing resamples anything.
+
+## Your agent stays your agent
+
+Cartesia runs the agent, so this plugin is transport and nothing else. There are no call tools to declare here, because whatever the agent does it does in its own code on Cartesia's platform.
+
+What reaches that code:
+
+<CardGroup cols={3}>
+  <Card title="Who is calling" icon="user">
+    Stream metadata: `callId`, `callerName`, `tenantId`, `direction`.
+  </Card>
+  <Card title="Call context" icon="circle-info">
+    `custom` events: participant counts, recording changes, the closing line.
+  </Card>
+  <Card title="Key presses" icon="grid">
+    Real `dtmf` events, read back out of the SDK's own context sentence.
+  </Card>
+</CardGroup>
+
+<Warning>
+  `CARTESIA_SYSTEM_PROMPT` is optional on purpose. Left unset, the agent keeps exactly the prompt you wrote on Cartesia's side. Set it and the caller's details are appended to yours. Nothing here ever silently rewrites a deployed prompt.
+</Warning>
+
+## Inside your own worker
+
+The plugin is a `CallHandler` like any other, so you can build it yourself instead of running the module:
+
+```python
+from standin import CallServer
+from standin.plugins.cartesia import CartesiaConfig, CartesiaHandler
+
+config = CartesiaConfig.from_env()
+server = CallServer(handler_factory=lambda: CartesiaHandler(config))
+await server.start()
+```
+
+Read the configuration **once**, then close over it. `handler_factory` runs once per call, so `handler_factory=CartesiaHandler` would call `CartesiaConfig.from_env()` again on every call: a key removed from the environment after startup would then fail the next caller instead of failing you.
+
+`server.start()` returns as soon as the listener is bound, so a script that ends there exits before a single call arrives. `serve()`, which is what `python -m standin.plugins.cartesia` runs, is the sample above plus an `await asyncio.Event().wait()` to hold the process open and an `await server.aclose()` in a `finally`, which drains live calls and releases the port on the way out.
+
+## Configuration
+
+| Variable | What it is |
+|---|---|
+| `CARTESIA_API_KEY` | Your API key. Used only to mint a per-call token over HTTPS, so the long-lived key never rides the agent socket. |
+| `CARTESIA_AGENT_ID` | Which Line agent answers the call. |
+
+<Accordion title="Optional settings">
+
+| Variable | What it is |
+|---|---|
+| `CARTESIA_VOICE_ID` | Override the agent's configured voice. |
+| `CARTESIA_INTRODUCTION` | What the agent says first. |
+| `CARTESIA_SYSTEM_PROMPT` | Appended to, never replacing, the prompt on Cartesia's side. Leave it unset and nothing is added. |
+| `CARTESIA_VERSION` | API version header. Defaults to `2025-04-16`. Pin it when Cartesia ships a version you have not tested. |
+| `CARTESIA_API_HOST` | Defaults to `api.cartesia.ai`. Must be a cartesia.ai host. |
+
+</Accordion>
+
+<Note>
+  The configuration is read once when the worker starts, not per call, so a missing key stops the worker at startup rather than surprising the first caller. `CARTESIA_API_HOST` is checked against the cartesia.ai suffix, because your API key travels to it: a wrong host would be credential leakage rather than a failed call. The same shape applies to every plugin, and the reasoning is on [Configuration](/python-sdk/configuration#why-a-vendor-host-is-pinned).
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Realtime providers" icon="bolt" href="/python-sdk/realtime-providers">
+    The startup buffer, the echo guard and barge-in that every provider plugin sits on.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/python-sdk/configuration">
+    Every `STANDIN_` variable, and the helpers for reading your own.
+  </Card>
+</CardGroup>

@@ -1,0 +1,292 @@
+---
+title: "Reaching people"
+description: "Speak into a call that is already up, otherwise ring somebody back and park the line until they answer, in the StandIn TypeScript SDK."
+keywords: ["outbound call microsoft teams agent", "ai agent calls you back", "outbound allowlist voice agent", "park message until answered", "standin voicedelivery"]
+icon: "phone-volume"
+---
+
+Every other lane in this SDK starts with somebody dialling your agent. This one runs the other way: something outside a call wants to reach a person. A scheduled job finished, a chat message asked to be called, a host handed off a task.
+
+Which way that lands depends on one thing: whether a call to that person is up right now.
+
+If one is, the line is spoken into it. Ringing somebody who is mid sentence with you is the rudest possible way to tell them something. If one is not, a call has to be placed and the line parked, so it is said the moment they answer.
+
+`VoiceDelivery` makes that choice, and `LiveCalls` is what it consults.
+
+```ts
+import {
+  LiveCalls,
+  OutboundCaller,
+  OutboundPolicy,
+  PendingMessages,
+  VoiceDelivery,
+} from "@komaa/standin-sdk";
+
+const live = new LiveCalls();
+const delivery = new VoiceDelivery(live, {
+  caller: new OutboundCaller(),
+  policy: OutboundPolicy.fromEnv(),
+  pending: new PendingMessages(),
+});
+
+const result = await delivery.deliver("Your build finished.", userObjectId);
+```
+
+Four pieces, and each answers one question. `live` is which calls are up. `policy` is whether this agent may ring that person at all. `caller` places the call. `pending` is what to say when they pick up.
+
+`new OutboundCaller()` reads `STANDIN_SECRET` and refuses to be built without it, because that secret is what signs the request. `STANDIN_WORKER_URL` is the StandIn control address it posts to, which StandIn gives you with your connection secret. Outbound calling is unavailable until it is set, and a URL that is not http or https, has no host, or carries credentials is refused when the caller is built rather than when somebody tries to ring.
+
+<Warning>
+  Every option is optional, and the defaults are the safe ones rather than the convenient ones. With no `policy`, `VoiceDelivery` builds `new OutboundPolicy({})`, whose allowlist is empty, so every call-back is refused. Pass `OutboundPolicy.fromEnv()` or an explicit list.
+</Warning>
+
+## Registering a live call
+
+A call registers itself, from the handler that owns it, for the life of that call.
+
+```ts
+import {
+  CallServer,
+  LiveCalls,
+  decodeWav,
+  type CallSession,
+  type LiveSpeaker,
+} from "@komaa/standin-sdk";
+
+class MyHandler implements LiveSpeaker {
+  #live: LiveCalls;
+  #session: CallSession | undefined;
+
+  constructor(live: LiveCalls) {
+    this.#live = live;
+  }
+
+  async onStart(session: CallSession) {
+    this.#session = session;
+    this.#live.register(this, session.callId, session.start.threadId);
+  }
+
+  async say(text: string) {
+    const session = this.#session;
+    if (session === undefined) throw new Error("this call is no longer up");
+    // Whatever makes this plugin's provider speak.
+    await session.sendAudio(decodeWav(await tts.speak(text)));
+  }
+
+  async aclose(reason: string) {
+    const session = this.#session;
+    this.#session = undefined;
+    if (session) this.#live.unregister(this, session.callId, session.start.threadId);
+  }
+}
+
+const live = new LiveCalls();
+const server = new CallServer({ handlerFactory: () => new MyHandler(live) });
+```
+
+`say(text: string): Promise<void>` is the whole `LiveSpeaker` interface. It belongs to the plugin because only the plugin knows how to make its provider speak without stepping on whatever the agent was already saying.
+
+Throw from `say` when the call has gone. A `say` that quietly does nothing resolves, and a resolved `say` is reported as `mode: "live-call"`, so the line is counted as spoken and nobody ever hears it.
+
+### Two keys, one call
+
+`register(speaker, callId, threadId = "")` files the speaker under the call id, and under the Microsoft Teams conversation when the call has one. Both, because a delivery addressed by conversation would otherwise miss a call that is only filed by call id, and the agent would place a second call to somebody already on the line with it.
+
+Each key is trimmed, and an empty one is skipped. `size` counts keys rather than calls, so a call filed under both counts twice.
+
+`deliver` looks the conversation up first and the target second. Whichever key names a live call wins, and `find(...keys)` returns `undefined` when none of them does.
+
+### Unregister removes this speaker's keys, and only this speaker's
+
+`unregister(speaker, callId, threadId = "")` deletes a key only when it still points at the speaker that is being removed.
+
+That identity check is the point. A second call on the same conversation can start before the first one's teardown runs. A blind delete would then wipe the live call's entry, and every later delivery for that conversation would ring a fresh call. The person would hear a second ring instead of an answer.
+
+### When the live call cannot speak
+
+If `say` rejects, the delivery does not stop there. It logs, falls through to the call-back path, and comes back with `mode: "call-back"`.
+
+A wedged provider socket would otherwise swallow the message with nobody told. The trade is deliberate: a half-spoken line can be repeated by the call-back, and a repeat beats silence.
+
+## Who the agent may ring
+
+`OutboundPolicy` is allow-by-explicit-listing. A directory id must be on the list before the agent can ring it, and an empty list means outbound calling is off.
+
+| Option | Default | What it is |
+|---|---|---|
+| `allowed` | empty | Directory ids the agent may ring. Empty means outbound is off. |
+| `maxPerHour` | `6` | Calls placed in any rolling hour, across all targets. Zero means no cap, which is a choice rather than a default. |
+
+`OutboundPolicy.fromEnv()` reads `STANDIN_OUTBOUND_ALLOW`, a comma-separated list of directory ids, and `STANDIN_OUTBOUND_MAX_PER_HOUR`. Unset means off.
+
+Matching is case-folded on both sides. A directory id is not case-sensitive, and a case mismatch would read as "not allowed" with nothing to say why.
+
+<Warning>
+This list is separate from any inbound allowlist, and stricter. Allowing every inbound caller allows no outbound target.
+
+The two answer different questions. Inbound asks "may this person talk to the agent?" and the person chose to dial. Outbound asks "may the agent ring this person?" and the agent was talked into it by whoever is on the call. An agent with an outbound tool and no allowlist is an agent that can be talked into cold-calling your directory.
+</Warning>
+
+Every refusal is one sentence, safe to read out loud:
+
+| When | What comes back in `error` |
+|---|---|
+| No allowlist | `outbound calling is off: set STANDIN_OUTBOUND_ALLOW to the directory ids this agent may ring` |
+| Not on it | `that person is not on this agent's outbound allowlist` |
+| No target at all | `an outbound call needs the person's directory id` |
+| Over the cap | `this agent has already placed 6 calls in the last hour` |
+
+## The tenant is operator configuration
+
+Which organisation a call is placed into comes from the `tenantId` option on `VoiceDelivery`, falling back to `STANDIN_TENANT_ID`. That variable name is exported as `TENANT_ENV`.
+
+It never comes from the message, the metadata, the model or the caller. A model is steered by whoever is talking to it, so a model that can choose the tenant is a model that can be talked into dialling a different organisation. With no tenant configured, `deliver` returns `no tenant is configured: set STANDIN_TENANT_ID to place calls` and rings nobody.
+
+Who gets rung follows the same reasoning. `CHAT_CALLBACK_TOOL` and `CALL_BACK_TOOL` take a `message` and nothing else: there is no target parameter on them, and there never will be.
+
+### Where the target comes from instead
+
+`OutboundLane.rememberChatSender(message)` records who last wrote in a conversation, reading it off the `InboundMessage` itself, and `chatCallbackTarget(conversationId)` hands that back as a `ChatCallbackTarget`.
+
+| Field | What it carries |
+|---|---|
+| `userObjectId` | The directory id to ring. |
+| `tenantId` | The organisation that message came from. |
+| `conversationId` | Where the request came from, so an unanswered call still has somewhere to go. |
+| `displayName` | What to call them, when the message carried a name. |
+
+The message is the only source. Never the message text, never a tool parameter: an agent that can be told who to ring is an agent that can be talked into ringing anybody, and the thing doing the telling is being steered by whoever is on the other end of it. A message with no `senderAadId` is recorded not at all, rather than recorded as an empty target.
+
+When nobody has written, or the last message is more than ten minutes old, what comes back is a sentence rather than a target: `I do not know who to call for this conversation.` or `That was a while ago. Ask me again and I can call you.` A sentence rather than a thrown error, because whatever reads this is a tool result a model says out loud. Check which you got before you use it, and TypeScript makes you: the return type is `ChatCallbackTarget | string`.
+
+```ts
+const target = lane.chatCallbackTarget(message.conversationId);
+if (typeof target === "string") return target; // already safe to read out
+const placed = await lane.place({
+  userObjectId: target.userObjectId,
+  text: "Your build finished.",
+  tenantId: target.tenantId,
+  threadId: target.conversationId,
+});
+```
+
+That ten minute window is `CHAT_CALLBACK_WINDOW_MS`, and the Python twin holds the same ten minutes as `CHAT_CALLBACK_WINDOW_S`, in seconds. The number cannot be copied between the two SDKs, only the duration.
+
+## The hourly budget counts calls that rang
+
+`policy.record()` runs after the call is placed and a call id comes back, not when the attempt starts.
+
+Counting attempts would let a broken worker burn the whole hour on calls that never rang anybody, and the next real delivery would be refused for an hour because of it. A worker that is down costs nothing against the budget. A phone that actually rang costs one.
+
+## What is parked, and where
+
+`PendingMessages` is on disk, and that is the part people get wrong.
+
+The leg that answers is **a different call**. You ask for the call in one place, and StandIn dials your worker minutes later with `direction: "outbound"` and a fresh `callId`. A restart between the two is ordinary, and it may not even be the same process. Parked in memory, the message is lost silently: the callee picks up and hears nothing, with no error anywhere.
+
+`stateDir()`, at the package barrel here and in `standin.outbound` on the Python side, is `STANDIN_STATE_DIR` when set, otherwise `~/.standin/state`, created owner-only. It is deliberately not a temp directory. A temp directory passes every test and loses every parked message on the next reboot.
+
+`VoiceDelivery` parks the record before `deliver` returns, because the leg can be answered before a later park would have run.
+
+| Field | What it carries |
+|---|---|
+| `callId` | The id the answering leg arrives with. |
+| `text` | The line to speak on answer. |
+| `threadId` | The conversation the request came from. |
+| `tenantId` | Which tenant to post the fallback into. Never taken from a model. |
+| `target` | Who was rung, so a second call to the same person can be refused while the first is still ringing. |
+| `requestedBy` | Directory id of whoever asked for the call, for the audit trail. |
+| `createdMs` | Stamped by `park` when the record has no time of its own. |
+| `attempts` | Delivery attempts so far, so a chat that keeps failing stops. |
+
+Popping is atomic. The rename is the lock, so two workers answering the same leg cannot both speak.
+
+```ts
+const parked = pending.pop(session.callId);
+if (parked !== undefined) await this.say(parked.text);
+```
+
+<Note>
+Nothing should be said while the leg is still ringing, and there is no "they picked up" message on the wire. `OutboundLane.attach(session, speak)` holds the record, treats recording going active as the answer, speaks then, and gives the record back if nobody ever picks up.
+</Note>
+
+### The thread id is how an unanswered call still reaches them
+
+A call is placed because somebody is owed something. If they do not pick up, they are still owed it.
+
+`threadId` is carried on the record for exactly that: it is the conversation the request came from, so the line can be posted there instead of evaporating. `OutboundLane` owns that sweep, and it posts once even when both the ring timer and the call outcome fire for the same call.
+
+`OutboundLane.place` parks no fallback at all for a call that has no real conversation, which is what `callThreadIsPostable` decides. A one-to-one call has no meeting conversation, and posting to what that field carries instead would either fail or reach the wrong place.
+
+What does the posting is whatever you passed as `new OutboundLane({ chat })`, and `ChatSender` is the shape it has to have: one `send({ tenantId, conversationId, text, idempotencyKey })` returning a promise of a boolean. `ChatChannel` already satisfies it, so the ordinary case is handing over the channel you already have. The interface exists so that a plugin posting through something else is not forced to wrap one. It is structural in TypeScript and a `Protocol` in Python, and it takes one options object here where the Python twin takes keyword arguments.
+
+It returns whether the message went, not whether it was attempted. A `false` puts the record back for another try, and after five attempts, or once the record is older than the lane's `ttlMs`, the lane gives up in the log rather than retrying for ever. The `idempotencyKey` is what makes the ring timer and the call outcome both firing for one call tell the person once.
+
+## The leg that answers
+
+Placing a call returns a `PlacedCall`, from `OutboundCaller.placeCall` and from `OutboundLane.place` alike.
+
+| Field | What it is |
+|---|---|
+| `callId` | The id the answering leg will arrive with. This is what a message is parked against. |
+| `scenarioId` | StandIn's own correlation id when it sends one, otherwise an empty string. Log it and a call in your records matches a call in a support question. |
+
+`OutboundLane.attach(session, speak)` turns that id back into an `OutboundLeg` on the call that answers, and returns `undefined` on an inbound one, so a plugin calls it unconditionally from `onStart` and forwards two things:
+
+```ts
+class MyHandler {
+  #leg: OutboundLeg | undefined;
+
+  async onStart(session: CallSession) {
+    this.#leg = lane.attach(session, (message) => this.say(message.text));
+  }
+
+  async onContext(text: string) {
+    await this.#leg?.onContext();
+  }
+
+  async aclose(reason: string) {
+    await this.#leg?.aclose(reason);
+  }
+}
+```
+
+The session only has to satisfy `OutboundSession`, which is the `callId`, the `direction` on `start`, `recordingActive` and an `end` to call, so a test double is four members rather than a whole call. The leg holds the parked line on `message` and speaks it through the `Speak` you gave `attach`, which owns the wording: only your plugin knows whether its provider takes an instruction or a literal line to say. A leg that finds nothing parked waits a few seconds before concluding there is nothing to say, because the leg can be answered before `place` has finished parking, and a race lost there is a caller who picks up to silence.
+
+**Recording going active is what "they answered" means.** There is no "they picked up" message on the wire, and recording turning on is what happens when a Microsoft Teams call is actually connected, so a forwarded `onContext` is the signal. A plugin with a better one calls `answered()` directly. A pickup fast enough to beat the attach is covered too, because arming checks the recording once on the spot rather than only waiting for the next one.
+
+**The leg runs its own watchdog**, ending a call nobody answered after the lane's `answerTimeoutMs`, which defaults to `DEFAULT_ANSWER_TIMEOUT_MS` and is two minutes. The idle watchdog cannot do this job: a ringing leg carries no caller audio by definition, so to that watchdog every outbound call looks dead from the moment it starts.
+
+**Nothing unsaid is thrown away.** If speaking rejects, the line is not marked spoken, because it was not said. If the leg closes with the line still unsaid, `aclose` releases the record rather than deleting it, and the sweep posts it to chat instead. Somebody was owed something, and not picking up does not stop them being owed it.
+
+<Note>
+  Every outbound duration here is named in milliseconds and the Python twin names the same duration in seconds: `DEFAULT_ANSWER_TIMEOUT_MS` against `DEFAULT_ANSWER_TIMEOUT_S`, `answerTimeoutMs` against `answer_timeout_s`, `ttlMs` against `ttl_s`. Port the duration, never the number.
+</Note>
+
+## The result
+
+```ts
+const result = await delivery.deliver(text, userObjectId, conversationId);
+if (!result.ok) return result.error ?? "";
+```
+
+| Field | What it means |
+|---|---|
+| `ok` | Whether the line reached a lane that will say it. |
+| `mode` | `"live-call"` when it was spoken into a call that was already up, or `"call-back"` when a call was placed and the line parked. Both strings are part of this API. |
+| `callId` | The call that was placed, on the call-back path. Absent otherwise. |
+| `error` | One sentence, safe to read out loud. Absent when `ok`. |
+
+<Note>
+`deliver` never throws. Whatever reads the result is either a host that marks the whole platform failed on an exception, or a model that says it out loud, and neither can do anything useful with a stack trace.
+</Note>
+
+Three refusals come from the placement rather than the policy:
+
+| When | What comes back in `error` |
+|---|---|
+| No `caller` was passed | `no outbound caller is configured on this deployment` |
+| The request failed | `could not place the call: ...`, with the reason appended |
+| No call id came back | `the call was not placed` |
+
+An empty line is refused before the registry is even consulted, with `there was nothing to say`. An empty message must never place a real phone call to a real person.

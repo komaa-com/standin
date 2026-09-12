@@ -1,0 +1,68 @@
+---
+title: "Microsoft Teams setup overview"
+description: "What you need to connect your agent to Microsoft Teams: an Azure bot identity, the StandIn app package, and a one-time upload to Microsoft Teams."
+keywords: ["Microsoft Teams bot setup","Microsoft Teams AI voice bot","Azure Bot Microsoft Teams channel","Microsoft Teams app package","StandIn Microsoft Teams setup","BYO bot"]
+---
+
+This page is the **Microsoft** side of the setup, and it is the same whichever SDK, plugin or
+language you use. Only the agent side differs.
+
+**Bring-your-own-bot** means your tenant owns the bot identity, StandIn answers its calls, and your
+worker supplies the agent. If you would rather not own a bot at all, StandIn publishes one you can
+connect to instead: [Connection modes](/teams/connection-modes) compares the two.
+
+<CardGroup cols={2}>
+  <Card title="Python SDK" href="/python-sdk/overview" icon="python">
+    `standin-sdk`, with plugins for ElevenLabs, Deepgram, Cartesia, LiveKit and Hermes.
+  </Card>
+  <Card title="TypeScript SDK" href="/typescript-sdk/overview" icon="js">
+    `@komaa/standin-sdk`, with plugins for ElevenLabs, Deepgram, Cartesia, OpenAI Realtime,
+    LiveKit and OpenClaw.
+  </Card>
+  <Card title="Quickstart" href="/quickstart" icon="rocket">
+    Answer a call with an echo before wiring an agent to it.
+  </Card>
+</CardGroup>
+
+## What you will create
+
+Three pieces, created once per bot identity:
+
+1. **A Microsoft Entra app registration** - the bot's identity (its client ID becomes your `botId`).
+2. **An Azure Bot resource** with the **Microsoft Teams channel** enabled - this is where you point
+   Microsoft Teams at StandIn's calling webhook and (optionally) messaging endpoint.
+3. **A Microsoft Teams app package** - a small zip (manifest + icons) that makes the bot callable in your
+   tenant. **You do not hand-build it**: your StandIn dashboard generates it per identity, ready to
+   upload.
+
+<Note>
+  You need rights to create resources in an **Azure subscription**, and a **Microsoft Teams / Entra admin**
+  (or someone who can act for you) to grant admin consent and allow the custom app. Budget
+  **20-30 minutes** for the first run-through.
+</Note>
+
+## Setup path
+
+<Steps>
+  <Step title="Create the bot identity in Azure">
+    Register the Entra app, create the Azure Bot resource, enable the Microsoft Teams channel with calling,
+    and grant the Graph permissions. Follow [Create the Azure bot](/teams/azure-bot).
+  </Step>
+  <Step title="Download the Microsoft Teams app package">
+    Grab the generated zip from your StandIn dashboard (or build it from the example manifest).
+    See [Get the Microsoft Teams app package](/teams/app-package).
+  </Step>
+  <Step title="Upload it to Microsoft Teams">
+    Upload the package as a custom app, or publish it to your organization. See
+    [Upload to Microsoft Teams and go live](/teams/publish).
+  </Step>
+  <Step title="Connect your agent and call">
+    Register your worker's **Agent calling URL** and the matching secret in StandIn, then place a
+    Microsoft Teams call to your bot. The [quickstart](/quickstart) covers both.
+  </Step>
+</Steps>
+
+<Tip>
+  No Azure tenant handy? The [sandbox (community tier)](/community) lets you try StandIn with a
+  shared bot in a public meeting - zero Azure setup, no app package needed.
+</Tip>

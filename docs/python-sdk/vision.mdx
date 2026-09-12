@@ -1,0 +1,291 @@
+---
+title: "Vision and the avatar"
+description: "What the caller shows your agent, what your agent shows back, and the face the caller sees, in the StandIn Python SDK."
+keywords: ["Microsoft Teams screen share AI", "video.frame", "display.image", "agent sees shared screen", "avatar lip sync", "ambient vision"]
+icon: "eye"
+---
+
+A Microsoft Teams call carries more than voice. StandIn samples the caller's camera and their screen share and forwards single frames to your worker, and it will draw an image you send onto the bot's own tile.
+
+Both halves are optional. A plugin that only wants to talk never touches any of this.
+
+## Frames arrive sparsely
+
+StandIn drops a frame rather than queueing it when the socket is busy. This is **not** a video stream and must not be treated as one.
+
+The useful shape, and the one every provider plugin ends up with, is to keep the latest frame and look only when something asks:
+
+```python
+frame = session.latest_video_frame()        # screen share wins over camera
+if frame is not None:
+    answer = await describer.describe(frame, "What is on the slide?")
+```
+
+The server keeps the latest frame per source for you, so a plugin that only wants on-demand vision implements no callback at all. Pass `"camera"` or `"screenshare"` to be explicit; with no argument the screen share wins, because an agent asked to look is nearly always being asked about what is being *shown* rather than who is showing it.
+
+Take every frame instead, which is what [ambient vision](#ambient-vision) needs, by implementing the optional sixth method:
+
+```python
+class MyHandler:
+    async def on_video_frame(self, frame) -> None:
+        ...
+```
+
+<Warning>
+  `on_video_frame` runs on the receive path of a live call. Do a slow model call off the frame loop, exactly as you would in `on_caller_audio`.
+</Warning>
+
+`on_video_frame` is deliberately not part of `CallHandler`, which is a runtime-checkable protocol: a sixth member there would make `isinstance(handler, CallHandler)` fail for every handler written before the vision lane existed, while the documented rule says each method is optional. The server duck-types it, so implementing it is enough.
+
+## What a frame is
+
+| Attribute | What it is |
+|---|---|
+| `source` | `"camera"` or `"screenshare"`. |
+| `width`, `height` | Pixels, already downscaled by StandIn. |
+| `mime` | `image/jpeg`. |
+| `data_base64` | The image exactly as it arrived. |
+| `data` | The decoded bytes, for an API that uploads a file. |
+| `data_url` | A `data:` URL, which is what most vision models take. |
+| `participant_id`, `participant_name` | Who it belongs to. Best-effort, and **absent** for guest and anonymous participants. |
+
+An unusable frame is dropped rather than raised. The call is healthy, the caller is still talking, and one malformed image is not worth ending a conversation over.
+
+### Who it came from, and whether it changed
+
+`VIDEO_SOURCES` is the pair `source` may hold, `("camera", "screenshare")`. A message naming anything else never becomes a `VideoFrame` at all, so you never have to defend against a third lane appearing.
+
+Four helpers turn a frame into something a model can be told about:
+
+| Function | What it gives you |
+|---|---|
+| `frame_owner(frame)` | The participant name the wire carried, or `None`. |
+| `fallback_owner(source)` | `"a participant"` for a screen share, `"the caller"` for a camera. |
+| `frame_caption(owner)` | The sentence that goes beside the picture, built from that owner alone: `screen shared by a participant`, or `camera of Dana`. |
+| `frame_digest(data_base64)` | A 32 character fingerprint of the frame. |
+
+Attribution **degrades rather than vanishing**. Guest and anonymous participants arrive with no name, and `fallback_owner` gives those a generic label instead of nothing, because "a participant's screen" is worth more to a model than an unlabelled picture. Dropping the attribution instead would leave a model in a group call unable to say whose deck it is looking at. `FrameDescriber` composes the two for you, and so does ambient vision.
+
+The digest answers one question, "is this the same screen as last time?", without keeping the picture to compare against. It hashes the base64 rather than the decoded bytes: two encodes of an unchanged screen are byte-identical, so it is exact, and it costs no decode on a path that sees every frame. The keyframe store uses it to avoid filling itself with one frozen slide, and ambient vision latches on it.
+
+## Giving a voice model eyes
+
+Most speech-to-speech providers hear but cannot see. `FrameDescriber` closes that gap: the frame goes to a vision model of your choosing and a sentence comes back.
+
+```bash
+export STANDIN_VISION_API_URL=https://api.openai.com/v1/chat/completions
+export STANDIN_VISION_MODEL=gpt-4o-mini
+export STANDIN_VISION_API_KEY=...
+```
+
+```python
+from standin import FrameDescriber
+
+describer = FrameDescriber.from_env()       # None when it is not configured
+```
+
+Any OpenAI-compatible chat-completions endpoint that accepts images works, including one you run yourself. The frame is sent for inference and **not stored**, which is the difference between this and uploading it into a provider's own conversation history.
+
+<Note>
+  This URL is deliberately **not** put through the SDK's fetch guard. It is yours, set by you in the environment, and a vision model on localhost is a normal way to run one. That is the opposite of an image URL a model chose, which is untrusted and does go through the guard.
+</Note>
+
+## Showing the caller something
+
+```python
+await session.display_image(chart_png, "image/png", duration_ms=4000, caption="Q3 revenue")
+```
+
+The image is drawn on the bot's video tile for a few seconds, then the avatar returns. `mode` is `"fullscreen"` or `"overlay"` for a picture-in-picture inset.
+
+Bytes or an already-base64 string both work. An image that is too large, or a type the service will not draw, is refused here where the error names the problem, rather than letting the service close the socket in the middle of a call.
+
+### Fetching an image a model chose
+
+An agent that can show a picture will sooner or later be handed a URL by its own model, and that model is steered by whoever is on the call:
+
+```python
+from standin.fetch import fetch_public_image
+from standin.vision import MAX_IMAGE_BYTES
+
+image, mime = await fetch_public_image(url, MAX_IMAGE_BYTES)
+```
+
+http and https only, no embedded credentials, and no host that resolves into private, loopback, link-local or reserved space. The address the socket actually connects to is re-checked, closing the window where a hostname resolves publicly for the validation and privately for the fetch. One redirect hop is followed, because image CDNs habitually redirect to the real asset, and the target goes through the whole guard again.
+
+## The tool surface
+
+`VisionTools` is the layer a model reaches for, and it lives in the core because every provider wants the same things and none of them should write the guards again. Build one per call and route your provider's tools at it.
+
+| Method | What it does |
+|---|---|
+| `look` | Answer a question about what the caller is showing now. |
+| `look_back` | Answer about a frame the caller has already moved past. |
+| `show` | Put an image you already have on the bot's tile. |
+| `show_url` | Fetch an image the model chose, through the guard, and show it. |
+| `show_file` | Put a local document on the tile: an image, a PDF page, an Office page. |
+| `show_many` | Show several pictures in turn, paced, without blocking the model. |
+| `walkthrough` | Say and show several of those in order, pausing for each. |
+
+**None of them raise at a model.** Every one returns a sentence, because the caller is a tool result being read back to something that will say it out loud, and an exception there is a silent tool and a confused agent.
+
+Two guards travel with them.
+
+**A budget**, because a model that can look can look in a loop and each look is a paid inference over somebody's screen. It is a sliding window, so a long call is not punished for having been long, and a failed look is refunded rather than charged. Spending returns a token and refunding takes that token back: two tool calls overlap, and refunding "the most recent charge" would refund the wrong one.
+
+**A keyframe store**, so "what did that slide say?" can be answered about a slide that is already gone. It is bounded, and it only keeps anything **while the call is being recorded**: keeping a history of somebody's screen is a materially different promise from glancing at it once, and the recording is what told the caller their call is being kept.
+
+### Fullscreen or beside your face
+
+`DISPLAY_MODES` is the pair: `("fullscreen", "overlay")`. Every showing method takes `display`, and the model chooses it **per picture** rather than once for the deployment, because an inset is unreadable for a dense screenshot or a page of a document, which is exactly when somebody says "show me". Hardcoding either mode is wrong for half of what an agent shows. `show_image` carries the choice as an enum in its schema, which a model obeys far more reliably than the same list written into a description.
+
+Anything else a model says, and `pip` and `full` are both things it will say, falls back to the default you configured. When you configured none, the field is left off the wire entirely and the service decides, rather than this SDK deciding for it.
+
+`normalize_display_mode(value, default=None)` is the single rule that decides, shared by both SDKs and every plugin. It trims and lowercases, returns the value only when it is one of the two, and returns `default` for everything else, including `None` and anything that is not a string at all. A value that is not a mode **falls back rather than being passed on**: it came from a model, and putting a nearly-right word on the wire turns a readable picture into a field the service has no meaning for.
+
+```python
+tools = VisionTools(session, describer=describer, default_display_mode="overlay")
+await tools.show_url(url, "Q3 revenue", display="fullscreen")
+```
+
+What the caller can actually see is on `tools.last_shown`, recorded only after a send returned. So "email me that" attaches what they saw rather than what was attempted.
+
+`last_shown` is a `ShownImage`: the `image` and `mime` exactly as they were sent, the `name` shown beside it, an `at_ms` stamp, and `as_base64()` for handing the same picture to something that wants a string. One slot, replaced each time, rather than a growing copy of everything shown on the call.
+
+The name comes from `display_image_name(path_or_url, mime)`. It takes the last path segment with any query and fragment cut off, and only when what is left already looks like a filename; anything else becomes `image.png` or `image.jpg` built from the type. `../../etc/passwd` is not a filename, and this string was chosen by a model and is about to be drawn on the caller's screen.
+
+### Several pictures in a row
+
+```python
+await tools.show_many(
+    [ShowItem(chart_png, "image/png"), ShowItem("https://example.com/table.png")],
+    caption="Q3",
+    hold_ms=4000,
+)
+```
+
+The first picture is on the tile before the call returns, so the model can say "here it is" and be right. The rest are paced from a detached task. A model that waited out a ten-picture slideshow before speaking would leave the caller in silence for most of a minute.
+
+`MAX_SLIDESHOW_IMAGES` pictures at a time, which is ten, and the sentence that comes back says when there were more: a model asked for "the slides" can mean forty of them. `hold_ms` defaults to `SLIDESHOW_HOLD_MS`, four seconds, and whatever you or a model passes is clamped to between one and thirty seconds.
+
+Each non-final picture is held past the pacing gap, by `SLIDESHOW_OVERLAP_MS` (half a second, in `standin.vision_tools` rather than at the barrel), so the next one arrives before the last has expired and the tile never blanks between two of them. The last carries no duration at all, so what stays on screen is the service's own default. Each picture is also loaded inside the pacing loop rather than up front, so a slideshow of ten URLs does not fetch all ten before the first appears, and one that fails skips that picture rather than the rest.
+
+There is one tile, so starting a slideshow or a walkthrough stops whatever was already running on it. The one being replaced is woken rather than killed: a picture already being sent finishes being sent, and the new first picture goes up immediately instead of waiting out the old gap.
+
+### Saying each one as it goes up
+
+`walkthrough` is the narrated version, and a `WalkthroughStep` is one beat of it: a line to `say`, and optionally an `image` with its `mime` and `caption` to put up once that line has been said.
+
+```python
+from standin import WalkthroughStep
+
+await tools.walkthrough(
+    [
+        WalkthroughStep(say="First, last quarter.", image=q3_png, mime="image/png"),
+        WalkthroughStep(say="And here is the forecast.", image=forecast_png, mime="image/png"),
+    ],
+    speak=self.say,
+    interrupted=lambda: self.caller_is_talking,
+)
+```
+
+`speak` is yours, because "the line has finished being said" is a thing only your provider knows, and a walkthrough that guesses talks over itself. `interrupted` is checked between beats, for the same reason: somebody who cuts in has stopped the tour, and only the plugin can tell that they did. A step whose line or picture fails stops the tour there and names the step, rather than narrating pictures nobody is seeing.
+
+### Showing a web page
+
+There is no browser in this SDK and there will not be one. `show_page` is the seam: you supply the renderer, it supplies the guard.
+
+```python
+from standin import SHOW_PAGE_TOOL, CallTools, VisionTools
+
+vision = VisionTools(session, describer=describer)
+tools = CallTools(session, vision=vision)
+tools.register(SHOW_PAGE_TOOL, lambda p: vision.show_page(p["url"], render=my_renderer))
+```
+
+`register` is on `CallTools`, not on `VisionTools`: one model sees one list of tools, so a tool of your own is added where the built-ins already are. The handler itself reaches straight into the vision tools.
+
+Your renderer takes a URL and returns bytes plus a mime type, never a path. A path would make this SDK read a file chosen downstream of whoever is on the call, which is not a thing it should be able to do.
+
+The URL goes through the same public-address guard as every other URL a model chose, and it goes through it **even when your renderer is a browser with private-network protection of its own**. That protection assumes whoever wrote the URL already has a shell on the machine. Here the URL was written by a model a stranger is steering, which is precisely the case the relaxation lets through.
+
+Your renderer gets `PAGE_RENDER_TIMEOUT_S`, forty five seconds, which `timeout_s` overrides per call. Past it the caller is told in words that the page did not load, counted in whole seconds, because that sentence is read out loud to the person waiting and nobody says "within 1 seconds". What does render stays up for `PAGE_DISPLAY_MS`, fifteen seconds, rather than the few a chart gets: a page is read rather than glanced at.
+
+`show_page` is deliberately not one of the built-in tools. The built-in list is declared unconditionally, so putting it there would tell every model on every deployment that it can show a web page, and then apologise to the caller on every call where no renderer exists. Register it when you have one.
+
+### Showing a file
+
+`show_file` is off until you name the directories it may read from:
+
+```bash
+export STANDIN_SHOW_ROOTS=/srv/shared-docs
+# pip install "standin-sdk[render]"  for PDF pages
+```
+
+The path reaching that function was chosen by a model that a caller is steering, so it is resolved before it is compared. A `../` and a symlink are both judged by where they actually land rather than by how they are spelled.
+
+Rendering a PDF or an Office document is optional. Without it the tool says which piece is missing rather than failing quietly.
+
+## Ambient vision
+
+`look` answers when a model reaches for it, which is the right shape most of the time and has one blind spot: the model has to know there is something to look at. Somebody who shares a deck and says "what do you think?" has told it nothing it can act on.
+
+`AmbientVision` closes that by pushing what changed on screen into the conversation between turns. It is **off unless a plugin turns it on**, because it spends money on every scene change and not every deployment wants that.
+
+```python
+from standin import AmbientImage, AmbientVision, CallSession, FrameDescriber, VideoFrame, VisionTools
+
+
+class MyHandler:
+    async def on_start(self, session: CallSession) -> None:
+        self.tools = VisionTools(session, describer=FrameDescriber.from_env())
+        self.ambient = AmbientVision(
+            session, self._push, enabled=True, budget=self.tools.budget
+        )
+
+    async def on_video_frame(self, frame: VideoFrame) -> None:
+        self.ambient.offer(frame)
+
+    async def aclose(self, reason: str) -> None:
+        await self.ambient.aclose()
+
+    async def _push(self, image: AmbientImage) -> None:
+        # Into the provider's context, without asking it to answer.
+        await self.provider.add_image(image.data_url, image.caption)
+```
+
+`offer` is synchronous, never blocks and never raises: it runs on the receive path of a live call, so all it does is keep the frame and wake the pass that does the work. `flush()` asks for a pass now and is safe to call from anywhere. `aclose()` stops it permanently and forgets what it was holding.
+
+### The sink is yours
+
+`AmbientSink` is the one thing you supply: `Callable[[AmbientImage], Awaitable[None]]`, a callable rather than a class, which is why the example above hands over a bound method and the name it carries is your own. What to DO with a picture stays in the plugin, because only the plugin knows how to hand one to its provider.
+
+Two rules on it, and both are load bearing.
+
+**It must not make the agent reply.** Ambient vision is context. An agent that answers every scene change talks over the person presenting, which is worse than not having looked.
+
+**It must raise when delivery fails.** A sink that swallows its own error latches a frame that never arrived, and the model never sees that screen again.
+
+`AmbientImage` is the frame with the decisions already made: `source`, `mime`, `data_base64`, `width`, `height` and `ts` as they arrived, the `owner` and the `caption` that says whose screen this is, and a `data_url` property for the providers that take one.
+
+### What keeps it from being expensive or creepy
+
+**The recording gate is checked before a frame is even stored.** Streaming somebody's screen to a model is a materially different promise from glancing at it once, and the recording is what told them their call is being kept. Storing the frame and gating only the send would mean that turning the recording on surfaces something from before the caller was told. Set `require_recording=False` only where something else made that promise.
+
+**The change latch is the last frame actually delivered**, per source, not the last one seen. A screen nobody touched costs nothing, and a delivery that failed leaves the latch alone and gives its charge back, so the same screen is retried rather than skipped. `change_key` replaces how sameness is judged; by default it is `frame_digest`.
+
+**The reserve stops the ambient lane spending the budget the caller's own request needs.** `VisionBudget.reserve` is a quarter of the window and never less than two, and the ambient lane is refused once the window is down to it, while an explicit `look` can still spend. A refused ambient push stops the whole pass rather than trying the next source, which would only spend the same exhausted budget. Hand `AmbientVision` the same `VisionBudget` your `VisionTools` holds, as the example above does, or that reserve protects nothing: given no budget it builds its own at `DEFAULT_AMBIENT_MAX_PER_MINUTE`, thirty a minute, and the two lanes are then capped independently instead of sharing one window. Handing it a budget with no ceiling at all, while enabled, logs a warning: every scene change is then charged.
+
+### Pacing, and holding what cannot go yet
+
+`AMBIENT_SOURCE_ORDER` is `("screenshare", "camera")`. When both changed, the screen share goes first: somebody presenting is nearly always talking about the screen rather than about their face.
+
+`AMBIENT_BACKSTOP_MS`, six seconds, is how often it looks again when no frame arrived at all. A screen share can go quiet without ending, and the last thing on it is still what is being discussed. The timer is armed by the first frame that gets past the gate, so a call with no video never starts one.
+
+`sink_ready` covers a provider whose socket comes up after the call does. While it answers no, images are charged, latched and held rather than dropped, and what was held goes out oldest first once it answers yes, so the model sees the screen change in the order it happened. The queue is bounded at `MAX_QUEUED_AMBIENT_IMAGES`, six: a sink that never comes up would otherwise hold the whole call's video, and the oldest is what goes, because what is on screen now is worth more than what was. A held image that fails on its way out is dropped rather than requeued, or a dead sink grows the queue for ever.
+
+`on_delivered` is called with each image that actually landed, which is what a meeting recap hooks so the minutes can say what was on screen. `delivered` and `queued` count those two things for a health check.
+
+## The avatar
+
+StandIn renders the avatar tile, and your worker steers it with two additive hints: the emotion the face wears, and the viseme timeline that makes the mouth match the words. Those, and putting your agent's own video on the tile in place of the rendered avatar, are on their own page: [The avatar](/python-sdk/avatar).

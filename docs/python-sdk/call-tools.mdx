@@ -1,0 +1,126 @@
+---
+title: "Call tools"
+description: "One set of call capabilities, declared in every provider's own JSON, in the StandIn Python SDK."
+keywords: ["AI agent hang up Microsoft Teams call", "voice agent function calling", "tool schema per provider", "agent tool dispatch"]
+icon: "wrench"
+---
+
+A voice model can talk. What it cannot do, unless you tell it, is hang up, put a picture on its own video tile, react with an expression, or look at what the caller is showing.
+
+Those are properties of being on a Microsoft Teams call, not of any provider, so they live in the SDK. Every plugin gets the same set, and a caller gets the same agent whichever provider answers.
+
+## The capabilities
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `end_call` | none | Hang up. |
+| `express` | `emotion` | Show an emotion on the avatar's face. |
+| `show_image` | `url`, `caption?`, `display?` | Put a picture on the bot's video tile. `display` is an enum, `fullscreen` or `overlay`, because a model obeys an enum in the schema far more reliably than the same list written into a description. |
+| `look` | `source?`, `question?` | Look at the caller's camera or screen share. |
+| `look_back` | `question?` | Look again at something already moved past. Recorded calls only. |
+
+The descriptions are written **for a model**. They say when to reach for a tool rather than what the code does, because that sentence is the only thing the model reads before deciding.
+
+`SHOW_PAGE_TOOL` is the sixth capability and is deliberately **not** built in. The built-in list is declared unconditionally, so a deployment with no renderer would be telling every model it can show a web page, promising the caller and then apologising on every call. An absent tool is honest; a broken one is not. A plugin that actually has a renderer registers it:
+
+```python
+from standin import SHOW_PAGE_TOOL
+
+tools.register(SHOW_PAGE_TOOL, show_page)
+```
+
+See [Showing a web page](/python-sdk/vision#showing-a-web-page).
+
+## Declaring them
+
+Every provider invented its own JSON for "here is a function you may call", so `schemas` renders one list in the shape yours wants.
+
+```python
+from standin import CallTools, VisionTools
+
+tools = CallTools(session, vision=VisionTools(session, describer=describer))
+agent.declare(tools.schemas("flat"))
+```
+
+| Dialect | Shape | Who takes it |
+|---|---|---|
+| `flat` | `{name, description, parameters}` | Deepgram's Settings, ElevenLabs' client tools |
+| `openai` | the same, tagged `type: "function"` | the Realtime API |
+| `anthropic` | `{name, description, input_schema}` | the Messages API |
+
+An unknown dialect falls back to `flat` rather than raising. A tool a model never sees is a worse outcome than a shape one provider happens to also accept, and a crash at connect time helps nobody.
+
+`tool_schemas(dialect, extra)` is the same rendering without a session, for a plugin that wants the declarations before there is a call to bind them to. `CallTools.schemas` is a thin wrapper over it.
+
+```python
+from standin import BUILT_IN_TOOLS, tool_schemas
+
+declarations = tool_schemas("openai", extra=(my_spec,))
+```
+
+`BUILT_IN_TOOLS` is the tuple your own specs are checked against, which is why a tool of your own may not shadow one and why that refusal happens at registration.
+
+## Running them
+
+Translate your provider's tool-call frame into a name and a dict, and hand it over:
+
+```python
+result = await tools.dispatch(name, params)     # never raises
+```
+
+**Dispatch never raises.** It returns a sentence, because the result goes back to a model that will read it out. "I could not show that because the image was too large" is worth something to a model; a traceback is not.
+
+When your provider's tool-result frame also carries an error flag, use `run` instead:
+
+```python
+outcome = await tools.run(name, params)   # a ToolResult: .text and .ok
+agent.send_result(call_id, outcome.text, is_error=not outcome.ok)
+```
+
+`ToolResult` is `from standin.calltools import ToolResult`, not the `standin` barrel, because a caller reads its two attributes far more often than it names the type.
+
+`ok` is false only when the SDK **knows** the tool did not do what it was asked: a missing or malformed argument, a rejected value, a handler that raised, or a name no tool answers. It is not a verdict on the vision tools, which answer in sentences by design, so "there is nothing to look at" comes back as ok with the reason in the text.
+
+## Tools of your own
+
+Your own tools go in the same place, so the model sees one list:
+
+```python
+from standin import ToolSpec
+
+tools.register(
+    ToolSpec(
+        "open_ticket",
+        "Use this when the caller reports a fault that needs following up.",
+        {"summary": {"type": "string", "description": "What is wrong, in one line."}},
+        required=("summary",),
+    ),
+    open_ticket,
+)
+```
+
+The handler may be sync or async and returns what the model is told. Keep it fast: the caller is listening to silence while it runs.
+
+A tool of your own may not shadow a built-in. `register` raises `ValueError` when you try, at registration rather than at the first call, because a shadowed `end_call` is an agent that has quietly lost the ability to hang up, and that is not something to discover mid-conversation.
+
+<Note>
+  The provider plugins already do all of this. Reach for `CallTools` when you are writing a plugin of your own, or adding capabilities to a handler you wrote yourself.
+</Note>
+
+## Tools that are not built in
+
+Five more capabilities ship as `ToolSpec` values you register yourself, for the same reason as `SHOW_PAGE_TOOL`: each one depends on something the call may not have, and an agent told it can do something it cannot is worse than one that never mentions it.
+
+| Spec | Register it when | Page |
+|---|---|---|
+| `CONSULT_TOOL` | A second, slower agent exists to delegate to. | [Consulting](/python-sdk/consulting) |
+| `BACKGROUND_TASK_TOOL` | There is somewhere to deliver a result after the call. | [Consulting](/python-sdk/consulting) |
+| `MINUTES_TOOL` | The call resolves to a conversation the recap may be posted into. | [Meeting recap](/python-sdk/minutes) |
+| `CALL_BACK_TOOL` | An outbound lane and its allowlist exist, so the agent can ring this caller again later. | [Reaching people](/python-sdk/reaching-people) |
+| `CHAT_CALLBACK_TOOL` | The same lane, for ringing the person you are chatting with instead of replying in writing. | [Reaching people](/python-sdk/reaching-people) |
+
+All five are on the `standin` barrel, and all five go through `tools.register(spec, handler)` exactly as your own do.
+
+## Whether to answer at all
+
+A tool decides what an agent can do. In a meeting, the prior question is whether it should say anything, and the SDK ships that separately: `GroupGate` and the wake-phrase matching around it. It is inert on a one-to-one call, so a plugin that never configures a phrase behaves exactly as it did before. See [Group calls](/python-sdk/group-calls).

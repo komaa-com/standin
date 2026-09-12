@@ -1,0 +1,276 @@
+---
+title: "Group calls"
+description: "GroupGate, wake phrases, the follow-up window and verbal interrupts for an agent in a Microsoft Teams meeting, in the StandIn TypeScript SDK."
+keywords: ["Microsoft Teams meeting AI agent", "wake phrase group call", "GroupGate follow-up window", "verbal interrupt stop playback", "meeting thread id"]
+icon: "users"
+---
+
+A 1:1 call is simple: every turn is for you. A meeting is not. People talk to each other, and an agent that answers every turn of a meeting is worse than one that says nothing, because it has to be muted or removed before the meeting can continue.
+
+Two decisions follow from that, and both are taken here rather than by your model:
+
+- **who gets answered**, so the agent stays out of a conversation it was not invited into
+- **what stops playback**, so "stop" stops it whether or not the model would have chosen to
+
+Both are taken deterministically in code, on a **finished** caller turn, and they consume the same thing: one transcript, once. Neither is left to the model, for the same two reasons. A model asked "was that for you?" has already been invoked, so a refused turn still costs a round trip and a bill. And a model asked to decide whether to keep talking is a model that is still talking while it decides.
+
+```ts
+import {
+  DEFAULT_FOLLOW_UP_WINDOW_MS,
+  GroupGate,
+  isAddressed,
+  isMeetingThread,
+  isVerbalInterrupt,
+  type GateDecision,
+} from "@komaa/standin-sdk";
+```
+
+Every name on this page is exported from the package root. There is no deep import for the gate module: the package publishes the root and the framework plugin subpaths and nothing else, so `@komaa/standin-sdk` is the import.
+
+## How the SDK knows it is a group call
+
+`isMeetingThread(threadId)` is the primary signal, and it is a string test:
+
+```ts
+import { isMeetingThread } from "@komaa/standin-sdk";
+
+isMeetingThread("19:meeting_abc@thread.v2"); // true
+isMeetingThread("8:orgid:0f2a...");          // false
+isMeetingThread("");                         // false
+isMeetingThread(undefined);                  // false
+```
+
+Microsoft's thread id for a meeting or a channel conversation begins `19:`. A 1:1 call has no such thread at all, so the presence of one is the signal. It reaches you as `session.start.threadId`, on every call, before the caller has said a word. See [Call handler](/typescript-sdk/call-handler#the-session-object).
+
+<Warning>
+  **A participant count never arrives on the meeting-join path.** A gate keyed on the count alone is dead on exactly the calls it exists for: every meeting the agent is invited to reads as a 1:1, and the agent answers every turn of it. The failure looks like a gate that was never switched on rather than one that was keyed to the wrong field, which is what makes it expensive to find.
+</Warning>
+
+That is not a hypothetical. The same mistake in the recap path sent every meeting recap to one attendee's private chat instead of to the meeting it summarised, because the count was pinned at 1 there too. See [Meeting recap](/typescript-sdk/minutes).
+
+`noteParticipants(count)` is the second signal, and it is deliberately weaker:
+
+```ts
+import { GroupGate, type CallSession } from "@komaa/standin-sdk";
+
+class MyHandler {
+  #call: CallSession | undefined;
+  #gate: GroupGate | undefined;
+
+  async onStart(session: CallSession) {
+    this.#call = session;
+    this.#gate = new GroupGate({
+      wakePhrases: ["assistant"],
+      threadId: session.start.threadId,
+    });
+  }
+
+  async onContext(text: string) {
+    // CallServer already parsed the count for you; read it, do not scrape it.
+    const count = this.#call?.participantCount ?? 0;
+    if (count > 0) this.#gate?.noteParticipants(count);
+    await this.#sendToModel(text);
+  }
+}
+```
+
+It corroborates and it never overrules. The count is kept as a running maximum, so a count of `1` arriving on a meeting thread adds nothing and takes nothing away: `gate.isGroup` stays true. The count is the signal that goes missing, so it may add certainty and must not remove it.
+
+`isGroup` is true when either signal says so: a meeting thread, or a count of two or more. That covers the group call that is not a meeting thread as well as the meeting whose count never came.
+
+Context sentences arrive at `onContext`, which is also where the recording status and keypad presses land. The count behind the sentence is on the session as `participantCount`, so there is nothing to parse out of the prose. See [Call handler](/typescript-sdk/call-handler#the-seven-methods).
+
+## Wake phrases and the follow-up window
+
+```ts
+import { GroupGate } from "@komaa/standin-sdk";
+
+const gate = new GroupGate({
+  wakePhrases: ["assistant", "مساعد"],
+  requireAddress: true,                    // default
+  followUpWindowMs: DEFAULT_FOLLOW_UP_WINDOW_MS, // 12_000
+  threadId: session.start.threadId,        // default: undefined, read as 1:1
+});
+```
+
+The constructor takes one options object, and one gate belongs to one call: the follow-up window is per-call state. `wakePhrases` is the only required field.
+
+`decide(transcript, nowMs)` returns a readonly `GateDecision` with two fields:
+
+| Field | What it means |
+|---|---|
+| `respond` | Speak an answer to this turn. |
+| `addressed` | This turn named the assistant. Opens the follow-up window. |
+
+```ts
+gate.decide("what do you all think?", 1_000);    // respond: false, addressed: false
+gate.decide("assistant, summarise that", 2_000); // respond: true,  addressed: true
+gate.decide("and the second point?", 7_000);     // respond: true,  addressed: false
+gate.decide("anyway, lunch", 20_000);            // respond: false, addressed: false
+```
+
+The window is why `addressed` is reported separately from `respond` rather than folded into it. A turn inside the window is answered **without having been addressed**, and only an addressed turn reopens the window. Those are different facts about the same turn, and conflating them costs you both: you cannot log who actually named the agent, and a follow-up would keep the floor open forever by being answered.
+
+The window is stored as a timestamp rather than a latched boolean. A missed wake phrase therefore self-heals by the clock instead of stranding the agent silent, or talkative, for the rest of the meeting.
+
+`nowMs` is yours to supply, and the gate never reads a clock itself. It only ever subtracts one of your timestamps from another, so any consistent millisecond source works: the SDK's own LiveKit plugin passes `Date.now()`, and `performance.now()` is the monotonic option if you would rather a system clock adjustment could not open or close the floor. Pick one and use it for every `decide` on that call. It also makes the whole decision testable without waiting twelve seconds.
+
+<Warning>
+  If you also run the [echo guard](/typescript-sdk/realtime-providers), do not reuse a `performance.now()` value there. `shouldSuppressEcho` compares against `Date.now()` internally and needs epoch milliseconds. The gate accepts either because it only compares differences; the echo guard does not.
+</Warning>
+
+`requireAddress: false` turns the gate off entirely and answers everything, on a meeting thread or not.
+
+On a 1:1 call the gate returns `respond: true` for every turn, and `addressed` still tells you truthfully whether the caller used your name. That is worth having even when nothing is being gated.
+
+## A gate with no phrase never opens
+
+`gate.active` is the question "is this gate muting anything right now?", and it is false unless all three of these hold: the call is a group, `requireAddress` is on, and **at least one non-blank wake phrase is configured**.
+
+```ts
+const gate = new GroupGate({ wakePhrases: [], threadId: "19:meeting_abc@thread.v2" });
+gate.active;                      // false
+gate.decide("hello", 1_000);      // respond: true
+```
+
+An empty wake list means the gate is off, on purpose. A gate with nothing that could ever open it would mute the assistant for the whole call, and nothing in the transcript would ever explain why. Silence is the one failure a caller cannot interpret and an operator cannot debug: it looks identical to a dead socket, a crashed worker and an agent that is thinking. A blank or whitespace-only phrase counts as no phrase, because a configuration file with an empty string in it is the usual way this happens.
+
+## Matching a name
+
+`isAddressed(transcript, wakePhrases)` is a case-insensitive match on **word boundaries**, not substrings.
+
+```ts
+import { isAddressed } from "@komaa/standin-sdk";
+
+isAddressed("assistant, what is the plan?", ["assistant"]); // true
+isAddressed("ASSISTANT, hello", ["assistant"]);             // true
+isAddressed("the assistants are ready", ["assistant"]);     // false
+isAddressed("مرحبا مساعد كيف حالك", ["مساعد"]);              // true
+```
+
+Boundaries rather than substrings because a substring match on a short name fires inside ordinary words, and the way that failure presents itself is the agent interrupting a meeting, which is the exact thing the gate was added to prevent.
+
+The boundary is written as "not a letter, digit or underscore" with Unicode property escapes rather than as a Latin word character, so an Arabic wake phrase behaves the same as a Latin one and needs no special case in your configuration. Phrases are trimmed and lowercased before matching, regex metacharacters in them are escaped, and an empty phrase never matches.
+
+<Note>
+  Choose a wake phrase that is not an ordinary word in the language the call will be held in. Word boundaries stop `assistant` matching `assistants`; they do not stop a name that happens to be a common noun from matching every time somebody uses it.
+</Note>
+
+## Stop means stop
+
+```ts
+import { isVerbalInterrupt } from "@komaa/standin-sdk";
+
+isVerbalInterrupt("stop by the store");                  // false
+isVerbalInterrupt("ok stop");                            // true
+isVerbalInterrupt("Assistant, stop.", ["assistant"]);    // true
+isVerbalInterrupt("hold on assistant", ["assistant"]);   // true
+isVerbalInterrupt("توقف");                                // true
+```
+
+`isVerbalInterrupt(text, wakePhrases?)` matches the **whole normalised utterance**, never a substring. "stop by the store" is a sentence somebody said in a meeting, and a substring rule would cut the agent off mid-answer every time it came up. Whole-utterance is the rule that makes this safe to run on every turn.
+
+Before the comparison the utterance is normalised: lowercased, apostrophes deleted rather than split on so `that's` becomes `thats`, combining marks and the Arabic tatweel deleted so a vocalised `تَوَقَّف` matches `توقف`, and everything that is not a letter collapsed to a space. Letters in any script survive, which is what lets an Arabic interrupt cut as instantly as an English one.
+
+Then filler and wake phrases are peeled off **both ends**, repeatedly until nothing changes, because the name can sit outside the filler or inside it and both orders are things people say. Pass your wake phrases in, or the name you chose will be the thing that defeats the match.
+
+<Note>
+  The second parameter is typed `string[]`, while `GroupGate.wakePhrases` is `readonly string[]`. Handing the gate's own list straight in is a compile error. Spread it: `isVerbalInterrupt(text, [...gate.wakePhrases])`.
+</Note>
+
+What is left has to be **at most four words** and has to match the phrase set exactly. The cap is the belt to the whole-utterance braces: a long sentence cannot reduce to an interrupt by accident, whatever the filler lists do.
+
+Interrupt phrases ship for two languages: English and Arabic. `stop`, `stop it`, `stop talking`, `wait`, `hold on`, `hang on`, `never mind`, `pause`, `one second`, `توقف`, `خلاص`, `لحظة` and their close neighbours. The set is a module-private constant in the gate module and there is no hook to extend it, so a phrase your callers use and the set does not is a wrapper around `isVerbalInterrupt`, not a configuration key.
+
+Two consequences worth knowing before you rely on it. The wake phrase on its own is an address and not a cut, because `"assistant?"` peels down to nothing and nothing never matches. And phrases that are merely close to the set are not in it: `"could you stop"` returns `false`, because widening the set to catch it is how a whole-utterance rule turns back into substring matching.
+
+An interrupt is worth nothing on its own. Pair it with `session.cancelPlayback()`. `onCallerTurn` below is **your own** method and not a `CallHandler` one: wire it to whatever your provider calls a finished caller transcript. Nothing in [Call handler](/typescript-sdk/call-handler#the-seven-methods) delivers a transcript, because only your provider produces one, so a method named for it on a handler is never called by anything.
+
+```ts
+/** The provider reported a finished caller transcript. */
+async onCallerTurn(text: string) {
+  if (isVerbalInterrupt(text, [...this.#wakePhrases])) {
+    await this.#call?.cancelPlayback();  // first: un-send what StandIn still holds
+    this.#provider.cancelResponse();     // then: stop the model generating more
+    return;
+  }
+}
+```
+
+`cancelPlayback()` first, because it is the only lever that un-sends audio StandIn already holds. Cancelling the model first stops it producing more, and the caller still hears every buffered sample of the answer they just interrupted. A caller who has said "stop" has stopped listening, and several seconds of the agent carrying on afterwards reads as the agent ignoring them. See [Barge-in](/typescript-sdk/call-handler#cancelplayback-is-the-barge-in).
+
+Suppress the reply to the interruption itself too. "stop" does not want an answer, it wants silence, and an agent that says "of course, I will stop" has not stopped.
+
+## Where to call it
+
+On a finished transcript, once, before you spend a model call.
+
+```ts
+/** The provider reported a finished caller transcript. Your method, not the SDK's. */
+async onCallerTurn(text: string) {
+  // Interrupts first: "stop" is not a turn to answer, and scoring it for
+  // wake phrases can only end in answering it.
+  if (isVerbalInterrupt(text, [...this.#wakePhrases])) {
+    await this.#call?.cancelPlayback();
+    this.#provider.cancelResponse();
+    return;
+  }
+
+  const decision = this.#gate!.decide(text, Date.now());
+  if (!decision.respond) {
+    this.#provider.cancelResponse();
+    return;
+  }
+
+  this.#provider.createResponse();
+}
+```
+
+Three things about that order and that placement.
+
+**Interrupts before the gate.** Run the gate first and "stop" is scored as an ordinary turn: inside the follow-up window it is answered, and "of course, I will stop" is the one reply a caller who said stop must never hear. Outside the window the gate refuses it, you return early, and the cut never happens at all while the agent carries on talking.
+
+**Finished transcripts, not partials.** A partial has not necessarily reached the name yet, so a gate run on partials refuses turns it would have accepted a syllable later. If you want the window stamped as early as possible, guard the partial path with `isAddressed` and let only that call `decide`: because the window is a timestamp, a stamp can only ever open the floor, never close it.
+
+```ts
+#onCallerTranscript(text: string, final: boolean) {
+  const gate = this.#gate;
+  if (gate === undefined) return;
+  if (!final) {
+    if (isAddressed(text, gate.wakePhrases)) gate.decide(text, Date.now());
+    return;
+  }
+  this.#lastDecision = gate.decide(text, Date.now());
+}
+```
+
+**Before the model call, not after.** A refused turn should cost nothing. If your provider answers on its own voice detection, put it in manual response mode while `gate.isGroup` is true and create the response yourself when `decision.respond` is true. A response cancelled after it has started generating is one the caller has already heard the beginning of, and a meeting hears the agent start to speak and then stop, which is more disruptive than either answering or staying quiet.
+
+There is one thing to check before any of this: whether your provider gives you a caller transcript at all. Without one there is nothing to gate on and nothing to match an interrupt against. Log that loudly at startup rather than shipping a gate that silently never fires, and leave auto-response on, because an ungated assistant is at least an assistant.
+
+## What is not the same in the Python SDK
+
+The gate itself is. `GroupGate`, `GateDecision`, `is_addressed`, `is_meeting_thread`, `is_verbal_interrupt` and `DEFAULT_FOLLOW_UP_WINDOW_MS` exist there under the same names in snake_case, with the same twelve second default, the same thread-id rule and the same "no phrase means no gate" catch. Porting a gate between the languages changes the casing, and one thing that is language-shaped rather than a decision: the constructor takes a single options object here and keyword arguments there.
+
+Two things around it are not the same, and both will bite a port that assumes otherwise.
+
+**The interrupt phrase set differs by language and by membership.** This SDK ships English and Arabic; the Python SDK ships English, Arabic, French and German. The lists are not translations of each other either: `"stop talking"`, `"hang on"`, `"pause"` and `"one second"` match here and not there, and `"cancel"`, `"stop stop"` and `"hold up"` match there and not here. There is also no four-word cap in the Python implementation. Test the phrases your callers actually use, in the SDK you are actually running, rather than porting a test suite across.
+
+**The echo guard is a different shape entirely.** The Python SDK has an `EchoGuard` class that owns its own playout clock, and because that clock is monotonic, one monotonic source serves both the gate and the guard there. This SDK has a `shouldSuppressEcho` function, no class, and a playout horizon you keep yourself: it must be on the epoch-millisecond scale, so the source that serves both here is `Date.now()`, and the monotonic option the gate would otherwise accept stops the guard firing at all. [Realtime providers](/typescript-sdk/realtime-providers) spells the difference out in full.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Realtime providers" icon="bolt" href="/typescript-sdk/realtime-providers">
+    The startup buffer and the echo guard, for a speech-to-speech agent.
+  </Card>
+  <Card title="Turn-taking" icon="waveform-lines" href="/typescript-sdk/voice">
+    For an agent that is not speech to speech: segmentation, WAV and paced playback.
+  </Card>
+  <Card title="Call handler" icon="plug" href="/typescript-sdk/call-handler">
+    Where the transcript, the context and `cancelPlayback` reach you.
+  </Card>
+  <Card title="Meeting recap" icon="file-lines" href="/typescript-sdk/minutes">
+    The other decision the meeting thread id makes for you.
+  </Card>
+</CardGroup>

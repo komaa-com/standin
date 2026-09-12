@@ -1,0 +1,329 @@
+---
+title: "Vision and the avatar"
+description: "What the caller shows your agent, what your agent shows back, and the face the caller sees, in the StandIn TypeScript SDK."
+keywords: ["Microsoft Teams screen share AI", "video.frame", "display.image", "agent sees shared screen", "avatar lip sync", "ambient vision"]
+icon: "eye"
+---
+
+A Microsoft Teams call carries more than voice. StandIn samples the caller's camera and their screen share and forwards single frames to your worker, and it will draw an image you send onto the bot's own tile.
+
+Both halves are optional. A plugin that only wants to talk never touches any of this.
+
+## Frames arrive sparsely
+
+StandIn drops a frame rather than queueing it when the socket is busy. This is **not** a video stream and must not be treated as one.
+
+The useful shape, and the one every provider plugin ends up with, is to keep the latest frame and look only when something asks:
+
+```ts
+const frame = session.latestVideoFrame(); // screen share wins over camera
+if (frame !== undefined) {
+  const answer = await describer.describe(frame, "What is on the slide?");
+}
+```
+
+The server keeps the latest frame per source for you, so a plugin that only wants on-demand vision implements no callback at all. Pass `"camera"` or `"screenshare"` to be explicit; with no argument the screen share wins, because an agent asked to look is nearly always being asked about what is being *shown* rather than who is showing it.
+
+Take every frame instead, which is what [ambient vision](#ambient-vision) needs, by implementing the optional sixth method:
+
+```ts
+class MyHandler {
+  async onVideoFrame(frame: VideoFrame) {
+    // ...
+  }
+}
+```
+
+<Warning>
+  `onVideoFrame` runs on the receive path of a live call. Do a slow model call off the frame loop, exactly as you would in `onCallerAudio`.
+</Warning>
+
+Every method on `CallHandler` is optional in TypeScript, so `onVideoFrame` is simply one more of them. The Python twin keeps it on a separate protocol, because its `CallHandler` is runtime-checkable and a sixth member there would break `isinstance` for every handler written before the vision lane existed.
+
+## What a frame is
+
+| Attribute | What it is |
+|---|---|
+| `source` | `"camera"` or `"screenshare"`. |
+| `width`, `height` | Pixels, already downscaled by StandIn. |
+| `mime` | `image/jpeg`. |
+| `dataBase64` | The image exactly as it arrived. |
+| `data` | The decoded bytes, for an API that uploads a file. |
+| `dataUrl` | A `data:` URL, which is what most vision models take. |
+| `participantId`, `participantName` | Who it belongs to. Best-effort, and **absent** for guest and anonymous participants. |
+
+An unusable frame is dropped rather than raised. The call is healthy, the caller is still talking, and one malformed image is not worth ending a conversation over.
+
+`dataBase64` is the field kept verbatim and the other two are derived from it, because base64 is the form most providers want back. That also makes the drop check exact: `parseVideoFrame` re-encodes what it decoded and compares, since `Buffer.from(value, "base64")` never throws on bad input and instead silently discards what it cannot read.
+
+### Who it came from, and whether it changed
+
+`VIDEO_SOURCES` is the pair `source` may hold, `["camera", "screenshare"]`, and the `VideoSource` type is derived from it. A message naming anything else never becomes a `VideoFrame` at all, so you never have to defend against a third lane appearing.
+
+Four helpers turn a frame into something a model can be told about:
+
+| Function | What it gives you |
+|---|---|
+| `frameOwner(frame)` | The participant name the wire carried, or `undefined`. |
+| `fallbackOwner(source)` | `"a participant"` for a screen share, `"the caller"` for a camera. |
+| `frameCaption(owner)` | The sentence that goes beside the picture, built from that owner alone: `screen shared by a participant`, or `camera of Dana`. |
+| `frameDigest(dataBase64)` | A 32 character fingerprint of the frame. |
+
+Attribution **degrades rather than vanishing**. Guest and anonymous participants arrive with no name, and `fallbackOwner` gives those a generic label instead of nothing, because "a participant's screen" is worth more to a model than an unlabelled picture. Dropping the attribution instead would leave a model in a group call unable to say whose deck it is looking at. `FrameDescriber` composes the two for you, and so does ambient vision, both of them as `frameOwner(frame) ?? fallbackOwner(frame.source)`.
+
+The digest answers one question, "is this the same screen as last time?", without keeping the picture to compare against. It hashes the base64 rather than the decoded bytes: two encodes of an unchanged screen are byte-identical, so it is exact, and it costs no decode on a path that sees every frame. The keyframe store uses it to avoid filling itself with one frozen slide, and ambient vision latches on it.
+
+## Giving a voice model eyes
+
+Most speech-to-speech providers hear but cannot see. `FrameDescriber` closes that gap: the frame goes to a vision model of your choosing and a sentence comes back.
+
+```bash
+export STANDIN_VISION_API_URL=https://api.openai.com/v1/chat/completions
+export STANDIN_VISION_MODEL=gpt-4o-mini
+export STANDIN_VISION_API_KEY=...
+```
+
+```ts
+import { FrameDescriber } from "@komaa/standin-sdk";
+
+const describer = FrameDescriber.fromEnv(); // undefined when not configured
+```
+
+Any OpenAI-compatible chat-completions endpoint that accepts images works, including one you run yourself. The frame is sent for inference and **not stored**, which is the difference between this and uploading it into a provider's own conversation history.
+
+`describe` throws on anything that goes wrong, so a caller can hand the reason back to the agent that asked, and it puts `frameCaption` into the question it sends, so the model is told whose screen it is looking at before it is asked anything about it.
+
+<Note>
+  This URL is deliberately **not** put through the SDK's fetch guard. It is yours, set by you in the environment, and a vision model on localhost is a normal way to run one. That is the opposite of an image URL a model chose, which is untrusted and does go through the guard.
+</Note>
+
+## Showing the caller something
+
+```ts
+await session.displayImage(chartPng, {
+  mime: "image/png",
+  durationMs: 4000,
+  caption: "Q3 revenue",
+});
+```
+
+The image is drawn on the bot's video tile for a few seconds, then the avatar returns. `mode` is `"fullscreen"` or `"overlay"` for a picture-in-picture inset.
+
+A Buffer or an already-base64 string both work. An image that is too large, or a type the service will not draw, is refused here where the error names the problem, rather than letting the service close the socket in the middle of a call.
+
+`DISPLAY_IMAGE_MIME_TYPES` is the whole list of what StandIn will draw, `["image/jpeg", "image/png"]`, and `MAX_IMAGE_BYTES` is `1400000`. That ceiling is not arbitrary: one wire message is bounded at 2 MB by both SDKs and base64 costs a third on top of the raw bytes, so 1.4 MB of image is what actually fits inside the envelope. A string you pass is measured **decoded**, because the decoded size is what the envelope bounds. Both names are at the barrel here; on the Python side they live in `standin.vision`.
+
+<Warning>
+  `MAX_IMAGE_BYTES` is the **outbound** ceiling, on what you draw on the tile. Inbound chat attachments have a separate and larger one, and passing this constant where that limit belongs compiles cleanly and quietly caps them at 1.4 MB. See [Chat attachments](/typescript-sdk/chat-attachments#images).
+</Warning>
+
+### Fetching an image a model chose
+
+An agent that can show a picture will sooner or later be handed a URL by its own model, and that model is steered by whoever is on the call:
+
+```ts
+import { fetchPublicImage, MAX_IMAGE_BYTES } from "@komaa/standin-sdk";
+
+const { bytes, mime } = await fetchPublicImage(url, MAX_IMAGE_BYTES);
+```
+
+http and https only, no embedded credentials, and no host that resolves into private, loopback, link-local or reserved space. The address the socket actually connects to is re-checked, closing the window where a hostname resolves publicly for the validation and privately for the fetch. One redirect hop is followed, because image CDNs habitually redirect to the real asset, and the target goes through the whole guard again.
+
+## The tool surface
+
+`VisionTools` is the layer a model reaches for, and it lives in the core because every provider wants the same things and none of them should write the guards again. Build one per call and route your provider's tools at it.
+
+| Method | What it does |
+|---|---|
+| `look` | Answer a question about what the caller is showing now. |
+| `lookBack` | Answer about a frame the caller has already moved past. |
+| `show` | Put an image you already have on the bot's tile. |
+| `showUrl` | Fetch an image the model chose, through the guard, and show it. |
+| `showMany` | Show several pictures in turn, paced, without blocking the model. |
+| `walkthrough` | Say and show several of those in order, pausing for each. |
+
+**None of them raise at a model.** Every one returns a sentence, because the caller is a tool result being read back to something that will say it out loud, and an exception there is a silent tool and a confused agent.
+
+`VisionToolsOptions` is the whole constructor surface: `describer`, `budget`, `keyframes` and `defaultDisplayMode`. Pass none and you get a `VisionBudget` and a `KeyframeStore` of its own and no describer, and `look` says so in a sentence rather than failing. `reset()` stops anything running and forgets what was shown, which is what teardown calls.
+
+Two guards travel with them.
+
+**A budget**, because a model that can look can look in a loop and each look is a paid inference over somebody's screen. It is a sliding window, so a long call is not punished for having been long, and a failed look is refunded rather than charged. Spending returns a token and refunding takes that token back: two tool calls overlap, and refunding "the most recent charge" would refund the wrong one.
+
+`new VisionBudget(6)` is the default ceiling per rolling minute. `tryConsume()` takes one look's worth or returns `undefined`, `refund(token)` gives one back and is idempotent, and `spent` is what has been charged in the current window. A `maxPerMinute` of zero means no cap at all, which is a deliberate choice rather than a default.
+
+**A keyframe store**, so "what did that slide say?" can be answered about a slide that is already gone. It is bounded, and it only keeps anything **while the call is being recorded**: keeping a history of somebody's screen is a materially different promise from glancing at it once, and the recording is what told the caller their call is being kept.
+
+`new KeyframeStore(16)` is the default capacity. `offer(frame, recording)` returns whether the frame was kept, `recent(source?)` reads the history oldest first, and `size` and `clear()` are the rest of it. It latches per source on `frameDigest`, so a screen nobody touched is kept once instead of filling the whole store with one picture.
+
+### Fullscreen or beside your face
+
+Every showing method takes a display mode, and the model chooses it per picture: `fullscreen` for something being read, `overlay` to keep the avatar beside it. `show_image` carries the choice as an enum in its schema, which a model obeys far more reliably than the same list written into a description.
+
+Anything else a model says, and `pip` and `full` are both things it will say, falls back to the default you configured. When you configured none, the field is left off the wire entirely and the service decides, rather than this SDK deciding for it.
+
+```ts
+const tools = new VisionTools(session, { describer, defaultDisplayMode: "overlay" });
+await tools.showUrl(url, "Q3 revenue", "fullscreen");
+```
+
+`DISPLAY_MODES` is that pair, `["fullscreen", "overlay"]`, and `normalizeDisplayMode(value, fallback?)` is the single rule that turns whatever a model said into one of them or into the fallback. It is exported because every plugin has to apply the *same* rule: a provider that mapped `pip` to `overlay` on its own would give one model a placement the other providers refuse, and one prompt would then behave differently on two deployments.
+
+What the caller can actually see is on `tools.lastShown`, recorded only after a send resolved. So "email me that" attaches what they saw rather than what was attempted. It is a `ShownImage`, carrying the `image`, its `mime`, the `name` shown beside it and the `atMs` it went up, with `asBase64()` for an API that wants the encoded form. One slot, replaced each time, because a list would be a growing copy of everything shown on the call.
+
+The name comes from `displayImageName(pathOrUrl, mime)`. It takes the last path segment with any query and fragment cut off, and only when what is left already looks like a filename: a name, a dot, a short extension, no separators of any kind. Anything else becomes `image.png` or `image.jpg` built from the type. `../../etc/passwd` is not a filename, and this string was chosen by a model and is about to be drawn on the caller's screen.
+
+A caption is trimmed to 200 characters before it reaches the screen, for the same reason the name is checked: a model's strings are as long as whoever is steering it wants them to be, and this one is drawn on somebody's call.
+
+### Several pictures in a row
+
+```ts
+await tools.showMany(
+  [
+    { image: chartPng, mime: "image/png" },
+    { image: "https://example.com/table.png" },
+  ],
+  "Q3",
+  "fullscreen",
+  4000,
+);
+```
+
+Each entry is a `ShowItem`: an `image` that is bytes, base64 or an https URL, an optional `mime` defaulting to `image/jpeg`, and an optional `name`. In TypeScript that is an interface, so an object literal is the whole construction; the Python twin is a dataclass you name.
+
+The first picture is on the tile before the call resolves, so the model can say "here it is" and be right. The rest are paced from a detached chain. A model that waited out a ten-picture slideshow before speaking would leave the caller in silence for most of a minute.
+
+`MAX_SLIDESHOW_IMAGES` pictures at a time, which is ten, and the sentence that comes back says when there were more: a model asked for "the slides" can mean forty of them. `holdMs` defaults to `SLIDESHOW_HOLD_MS`, four seconds, and whatever you or a model passes is clamped to between one and thirty seconds.
+
+Each non-final picture is held past the pacing gap, by `SLIDESHOW_OVERLAP_MS` (half a second, at the barrel here and in `standin.vision_tools` on the Python side), so the next one arrives before the last has expired and the tile never blanks between two of them. The last carries no duration at all, so what stays on screen is the service's own default. Each picture is also loaded inside the pacing loop rather than up front, so a slideshow of ten URLs does not fetch all ten before the first appears, and one that fails skips that picture rather than the rest.
+
+There is one tile, so starting a slideshow or a walkthrough stops whatever was already running on it. The one being replaced is woken rather than killed: a picture already being sent finishes being sent, and the new first picture goes up immediately instead of waiting out the old gap. `tools.slideshow` is the promise for the one now running, when you want to let it finish.
+
+### Saying each one as it goes up
+
+`walkthrough` is the narrated version, and a `WalkthroughStep` is one beat of it: a line to `say`, and optionally an `image` with its `mime` and `caption` to put up once that line has been said.
+
+```ts
+import type { WalkthroughStep } from "@komaa/standin-sdk";
+
+const steps: WalkthroughStep[] = [
+  { say: "First, last quarter.", image: q3Png, mime: "image/png" },
+  { say: "And here is the forecast.", image: forecastPng, mime: "image/png" },
+];
+
+await tools.walkthrough(steps, (text) => this.say(text), () => this.callerIsTalking);
+```
+
+`speak` is yours, a `Speaker` of `(text: string) => Promise<void>`, because "the line has finished being said" is a thing only your provider knows, and a walkthrough that guesses talks over itself. `interrupted` is checked between beats, for the same reason: somebody who cuts in has stopped the tour, and only the plugin can tell that they did. A step whose line or picture fails stops the tour there and names the step, rather than narrating pictures nobody is seeing.
+
+### Showing a web page
+
+There is no browser in this SDK and there will not be one. `showPage` is the seam: you supply the renderer, it supplies the guard.
+
+```ts
+import { CallTools, SHOW_PAGE_TOOL, VisionTools } from "@komaa/standin-sdk";
+
+const vision = new VisionTools(session, { describer });
+const tools = new CallTools(session, { vision });
+tools.register(SHOW_PAGE_TOOL, (p) => vision.showPage(String(p.url), undefined, myRenderer));
+```
+
+`register` is on `CallTools`, not on `VisionTools`: one model sees one list of tools, so a tool of your own is added where the built-ins already are. The handler itself reaches straight into the vision tools.
+
+Your renderer is a `PageRenderer`: it takes a URL and returns bytes plus a mime type, never a path. A path would make this SDK read a file chosen downstream of whoever is on the call, which is not a thing it should be able to do.
+
+The URL goes through the same public-address guard as every other URL a model chose, and it goes through it **even when your renderer is a browser with private-network protection of its own**. That protection assumes whoever wrote the URL already has a shell on the machine. Here the URL was written by a model a stranger is steering, which is precisely the case the relaxation lets through.
+
+`PAGE_RENDER_TIMEOUT_MS` is forty-five seconds and is `showPage`'s fourth argument when you want a different one. A renderer past it is not cancelled, because nothing here can cancel a host browser; the timeout is what stops the caller waiting in silence, and what comes back counts whole seconds, never `1 seconds` and never `0 seconds`, because it is read out loud to the person who is waiting. `PAGE_DISPLAY_MS` is fifteen seconds, longer than a chart gets, because a page is read rather than glanced at, and with no caption of your own the URL is used, cut to 80 characters.
+
+<Note>
+  The Python twin spells that first one `PAGE_RENDER_TIMEOUT_S` and holds `45.0`. The same forty-five seconds, a different units suffix, and a value that cannot be copied between the two SDKs.
+</Note>
+
+`showPage` is deliberately not one of the built-in tools. The built-in list is declared unconditionally, so putting it there would tell every model on every deployment that it can show a web page, and then apologise to the caller on every call where no renderer exists. Register it when you have one.
+
+<Note>
+  Putting a **local document** on the tile is Python only today: `show_file` and its `STANDIN_SHOW_ROOTS` allowlist have no TypeScript twin. These tools cover looking, showing an image you have, showing one from a URL, and showing a page you render.
+</Note>
+
+## Ambient vision
+
+`look` answers when a model reaches for it, which is the right shape most of the time and has one blind spot: the model has to know there is something to look at. Somebody who shares a deck and says "what do you think?" has told it nothing it can act on.
+
+`AmbientVision` closes that by pushing what changed on screen into the conversation between turns. It is **off unless a plugin turns it on**, because it spends money on every scene change and not every deployment wants that.
+
+```ts
+import {
+  AmbientVision,
+  FrameDescriber,
+  VisionTools,
+  ambientImageDataUrl,
+  type AmbientImage,
+  type CallSession,
+  type VideoFrame,
+} from "@komaa/standin-sdk";
+
+class MyHandler {
+  #tools!: VisionTools;
+  #ambient!: AmbientVision;
+
+  async onStart(session: CallSession) {
+    this.#tools = new VisionTools(session, { describer: FrameDescriber.fromEnv() });
+    this.#ambient = new AmbientVision(session, (image) => this.#push(image), {
+      enabled: true,
+      budget: this.#tools.budget,
+    });
+  }
+
+  async onVideoFrame(frame: VideoFrame) {
+    this.#ambient.offer(frame);
+  }
+
+  async aclose(reason: string) {
+    await this.#ambient.close();
+  }
+
+  async #push(image: AmbientImage) {
+    // Into the provider's context, without asking it to answer.
+    await this.provider.addImage(ambientImageDataUrl(image), image.caption);
+  }
+}
+```
+
+`offer` is synchronous, never blocks and never throws: it runs on the receive path of a live call, so all it does is keep the frame and wake the pass that does the work. That pass is *scheduled* rather than started inline, because calling an async function runs its body up to the first `await` synchronously, and a pass begun inside `offer` would do vision work on the frame loop and deliver frames out of order. `flush()` asks for a pass now and is safe to call from anywhere. `close()` stops it permanently and forgets what it was holding; the Python twin spells that one `aclose()`.
+
+The session you hand it only has to satisfy `AmbientSession`, which is `recordingActive` and nothing else, so a fake in a test is one field. The options are `AmbientVisionOptions`. Neither type has a Python counterpart to import: there the options are keyword arguments, and the session is read for `recording_active` rather than typed at all.
+
+### The sink is yours
+
+`AmbientSink` is the one thing you supply, `(image: AmbientImage) => Promise<void>`. What to DO with a picture stays in the plugin, because only the plugin knows how to hand one to its provider.
+
+Two rules on it, and both are load bearing.
+
+**It must not make the agent reply.** Ambient vision is context. An agent that answers every scene change talks over the person presenting, which is worse than not having looked.
+
+**It must reject when delivery fails.** A sink that swallows its own error latches a frame that never arrived, and the model never sees that screen again.
+
+`AmbientImage` is the frame with the decisions already made: `source`, `mime`, `dataBase64`, `width`, `height` and `ts` as they arrived, plus the `owner` and the `caption` that says whose screen this is. `ambientImageDataUrl(image)` builds the `data:` form for the providers that take one. It is a free function here because `AmbientImage` is an interface that a plain object satisfies; the Python twin is a dataclass and carries the same thing as an `image.data_url` property.
+
+### What keeps it from being expensive or creepy
+
+**The recording gate is checked before a frame is even stored.** Streaming somebody's screen to a model is a materially different promise from glancing at it once, and the recording is what told them their call is being kept. Storing the frame and gating only the send would mean that turning the recording on surfaces something from before the caller was told. Set `requireRecording: false` only where something else made that promise.
+
+**The change latch is the last frame actually delivered**, per source, not the last one seen. A screen nobody touched costs nothing, and a delivery that failed leaves the latch alone and refunds its charge, so the same screen is retried rather than skipped. `changeKey` replaces how sameness is judged; by default it is `frameDigest`.
+
+**The reserve stops the ambient lane spending the budget the caller's own request needs.** `VisionBudget.reserve` is a quarter of the window and never less than two, and the ambient lane is refused once the window is down to it, while an explicit `look` can still spend. A refused ambient push stops the whole pass rather than trying the next source, which would only spend the same exhausted budget. Hand `AmbientVision` the same `VisionBudget` your `VisionTools` holds, as the example above does, or that reserve protects nothing: given no budget it builds its own at `DEFAULT_AMBIENT_MAX_PER_MINUTE`, thirty a minute, and the two lanes are then capped independently instead of sharing one window. Handing it a budget with no ceiling at all, while enabled, logs a warning: every scene change is then charged.
+
+### Pacing, and holding what cannot go yet
+
+`AMBIENT_SOURCE_ORDER` is `["screenshare", "camera"]`. When both changed, the screen share goes first: somebody presenting is nearly always talking about the screen rather than about their face.
+
+`AMBIENT_BACKSTOP_MS`, six seconds, is how often it looks again when no frame arrived at all. A screen share can go quiet without ending, and the last thing on it is still what is being discussed. The timer is armed by the first frame that gets past the gate, so a call with no video never starts one, and `backstopMs` of your own is floored at half a second.
+
+`sinkReady` covers a provider whose socket comes up after the call does. While it answers no, images are charged, latched and held rather than dropped, because they are going to be sent and refunding would re-send the same screen once the sink came up. What was held goes out oldest first once it answers yes, so the model sees the screen change in the order it happened. The queue is bounded at `MAX_QUEUED_AMBIENT_IMAGES`, six: a sink that never comes up would otherwise hold the whole call's video, and the oldest is what goes, because what is on screen now is worth more than what was. A held image that fails on its way out is dropped rather than requeued, or a dead sink grows the queue for ever.
+
+`onDelivered` is called with each image that actually landed, which is what a meeting recap hooks so the minutes can say what was on screen, and a throw inside it never fails a delivery that already happened. `delivered` and `queued` count those two things for a health check.
+
+## The avatar
+
+StandIn renders the avatar tile, and your worker steers it with two additive hints: the emotion the face wears, and the viseme timeline that makes the mouth match the words. Those, and putting your agent's own video on the tile in place of the rendered avatar, are on their own page: [The avatar](/typescript-sdk/avatar).
