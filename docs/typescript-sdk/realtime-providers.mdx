@@ -1,0 +1,306 @@
+---
+title: "Realtime providers"
+description: "StartupBuffer and the echo guard for a speech-to-speech agent: what arrives before you are ready, and why the agent answers itself, in the StandIn TypeScript SDK."
+keywords: ["realtime speech to speech Microsoft Teams", "agent answering its own echo", "StartupBuffer early caller audio", "barge-in RMS threshold", "playout clock echo suppression"]
+icon: "bolt"
+---
+
+A realtime speech-to-speech provider is handed the caller's audio and hands audio back, and the turn-taking is theirs. That is the whole reason to use one, and it is why [Turn-taking](/typescript-sdk/voice) is a page you can skip: no segmenter, no paced playback, no pipeline of three vendors to keep in step.
+
+This page is the other half of that bargain. The provider owns the turn. It does not own the two things on either side of it:
+
+- **what arrived before your provider was ready to take it**, which the provider cannot hold because it did not exist yet
+- **whether the audio coming back is somebody else's voice or your own**, which the provider cannot know because it only sees one stream
+
+Neither is a property of any framework, so neither lives in a plugin. Both are here.
+
+```ts
+import {
+  ECHO_BARGE_IN_RMS,
+  ECHO_SUPPRESSION_WINDOW_MS,
+  MAX_PENDING_AUDIO,
+  MAX_PENDING_CONTEXT,
+  StartupBuffer,
+  pcm16Rms,
+  shouldSuppressEcho,
+  type EchoGuardOptions,
+} from "@komaa/standin-sdk";
+```
+
+Every name on this page is exported from the package root. There is no deep import for these modules: the package publishes the root and the framework plugin subpaths and nothing else, so `@komaa/standin-sdk` is the import. `pcm16Rms` is also re-exported as `echoPcm16Rms`, which is the same function under an older name.
+
+## What arrives before your agent is ready
+
+The call starts the moment StandIn dials. Your agent starts later: a socket has to open, a room has to be joined, a session has to be configured, an agent job has to be dispatched and accepted.
+
+`onStart` covers part of that gap for you, because inbound messages are queued while it runs. It does not cover the rest of it. A socket that is open is not a session that is configured, a room you have joined is not an agent that has joined it, and a handler that returns from `onStart` rather than holding the call open has handed itself the same gap deliberately, which is often the right call: `onStartTimeoutMs` is 15 seconds and a caller waiting on a slow provider hears dead air. See [onStart](/typescript-sdk/call-handler#the-seven-methods).
+
+Two things land in that window and both matter.
+
+**The caller's first words.** People start talking the instant the call connects, and the first thing they say is very often the reason they called. Drop it and the agent opens by asking a question that was already answered, which is the single most common way a demo call goes wrong.
+
+**The first context.** The `There are 4 human participants on this call. Stay quiet unless directly addressed.` line and the `The Microsoft Teams call recording is now ACTIVE.` change both land in that same first moment. Drop those and a [group gate](/typescript-sdk/group-calls) never engages, so the agent answers every turn of a meeting, and a recording gate never opens, so an agent that waits to be told the call is recorded waits for the whole call. Neither failure looks like a dropped message. Both look like a feature that was never built.
+
+<Note>
+  Gate your own storage on `session.recordingActive`, which the SDK keeps current from `session.start` and every later status change, rather than on a sentence you happened to catch. What the buffer protects is the copy that reaches your **provider**, which has no other way to learn either fact.
+</Note>
+
+```ts
+import { StartupBuffer, type CallSession } from "@komaa/standin-sdk";
+
+class MyHandler {
+  readonly #pending = new StartupBuffer();
+  #agent: Provider | undefined;
+
+  async onStart(session: CallSession) {
+    this.#agent = await connectToProvider();
+    await this.#pending.release(
+      (pcm) => this.#agent!.sendAudio(pcm),
+      (line) => this.#agent!.sendContext(line),
+    );
+    const { audio, context } = this.#pending.dropped;
+    if (audio || context) {
+      console.info("standin: the caller outran the agent starting up");
+    }
+  }
+
+  async onCallerAudio(pcm: Buffer) {
+    if (this.#pending.holding) this.#pending.audio(pcm);
+    else this.#agent!.sendAudio(pcm);
+  }
+
+  async onContext(text: string) {
+    if (this.#pending.holding) this.#pending.context(text);
+    else this.#agent!.sendContext(text);
+  }
+
+  async aclose(reason: string) {
+    if (this.#pending.holding) this.#pending.discard();
+  }
+}
+```
+
+| Member | What it does |
+|---|---|
+| `new StartupBuffer(maxAudio = MAX_PENDING_AUDIO, maxContext = MAX_PENDING_CONTEXT)` | One per call. Each bound is floored at 1. |
+| `holding` | Whether the agent is still being set up. False after `release` or `discard`. |
+| `audio(pcm)` | Hold one frame of the caller's voice. An empty buffer is ignored. |
+| `context(text)` | Hold one line of call context. An empty string is ignored. |
+| `await release(sendAudio?, sendContext?)` | Hand everything over, in order, and stop holding. Resolves to `{ audio, context }`, the counts released. |
+| `dropped` | What was lost to the bounds, as `{ audio, context }`. |
+| `discard()` | Throw it away, for a call that ended before the agent was ready. |
+
+Order is preserved within each lane, and **audio is released before context**. The provider needs the caller's words in the order they were said; the context is a note about the call rather than part of the conversation, so it belongs after the words and not interleaved with them.
+
+Both callbacks may be sync or async, and each is awaited. A provider's send is often fire-and-forget, and forcing a promise on one that is not is how a plugin ends up wrapping every send in a lambda. Either callback may be omitted, for a lane your provider has no route for: the buffer still drains and still stops holding, it just sends nothing.
+
+`release` is safe to call twice: the second call releases nothing and resolves to `{ audio: 0, context: 0 }`. That matters on the failure paths, where `onStart` can end early in more than one place.
+
+## Audio first, context second, oldest dropped first
+
+Two caps, both defaults, both overridable per buffer:
+
+| Constant | Value | What it is |
+|---|---|---|
+| `MAX_PENDING_AUDIO` | `200` | Frames of the caller's voice. At the wire's 20 ms frame that is **4 seconds** of speech. |
+| `MAX_PENDING_CONTEXT` | `20` | Lines of call context. Context sentences are rare and each one is small, so this is generous. |
+
+Four seconds is enough to hold an opening sentence and far short of enough to hide a socket that never opened. That is the whole calculation. A provider that is going to connect has connected by then; a provider that is not going to connect must not be allowed to accumulate the caller's entire call in memory while it fails to, on every concurrent call the worker is carrying.
+
+When the cap is reached, the **oldest** entry goes and the newest is kept. If something has to be lost, lose the stale audio: the words the agent is about to answer are the ones the caller just said, and an agent that opens on a four-second-old fragment is worse than one that opens on the most recent sentence.
+
+<Note>
+  Log a non-zero `dropped`. It is the one signal that tells you the caller outran your provider's startup, and there is no other place it shows up: the call sounds normal, the agent answers, and the only trace is the sentence nobody accounted for. Treat it as a startup-latency alarm rather than an error.
+</Note>
+
+`discard()` exists for the call that ends before the agent is ready. Use it in `aclose` when `holding` is still true, rather than releasing into a provider you are about to close.
+
+## The agent answering itself
+
+On a speakerphone, and on any laptop whose user has not got a headset on, the agent's own voice comes out of the speaker and goes straight back into the microphone. It arrives at your handler as caller audio. The provider's voice detection hears a turn, ends it, and replies to it. Then that reply loops back, and it replies to that. The caller is silent throughout and cannot get a word in, and it continues until somebody hangs up. It is not a subtle degradation, it is the call being taken over.
+
+<Warning>
+  **The two SDKs are not the same shape here.** The Python SDK has an `EchoGuard` **class** that owns its own playout clock: you call `note_output`, `collapse` and `mark_caller_turn` on it, and ask `allow_input(rms)` per frame. This SDK has **no class**. It has one pure function, `shouldSuppressEcho`, and the clock is yours to keep. Anything you read about `EchoGuard` applies to the Python SDK only. The differences are tabulated at the end of this page.
+</Warning>
+
+`shouldSuppressEcho(pcm16k, playbackActiveUntil, opts?)` decides, per inbound frame, whether the caller's audio is withheld from the model.
+
+```ts
+import {
+  FrameAligner,
+  REALTIME_SAMPLE_RATE_HZ,
+  SAMPLE_RATE_HZ,
+  frameDurationMs,
+  resamplePcm16,
+  shouldSuppressEcho,
+  type CallSession,
+} from "@komaa/standin-sdk";
+
+class MyHandler {
+  readonly #aligner = new FrameAligner();
+  #call: CallSession | undefined;
+  #provider: Provider | undefined;
+  /** Epoch ms at which the audio already sent finishes PLAYING. */
+  #playbackEndAt = 0;
+  /** False until the caller has genuinely spoken once. */
+  #callerTurnStarted = false;
+
+  async onCallerAudio(pcm: Buffer) {
+    if (shouldSuppressEcho(pcm, this.#playbackEndAt, { allowBargeIn: this.#callerTurnStarted })) {
+      return;
+    }
+    this.#provider!.appendInput(resamplePcm16(pcm, SAMPLE_RATE_HZ, REALTIME_SAMPLE_RATE_HZ));
+  }
+
+  async #onModelAudio(pcm24: Buffer) {
+    const pcm = resamplePcm16(pcm24, REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ);
+    for (const frame of this.#aligner.push(pcm)) {
+      await this.#call!.sendAudio(frame);
+      // Duration, not frame count: it is what the guard compares against the clock.
+      this.#playbackEndAt = Math.max(this.#playbackEndAt, Date.now()) + frameDurationMs(frame);
+    }
+  }
+}
+```
+
+<Warning>
+  The polarity is "should I suppress this", not "may this through". `true` means **drop the frame**. Reading it the other way round mutes the caller for the whole call and passes the echo, which is the exact failure inverted.
+</Warning>
+
+The function is stateless and takes the raw frame rather than a number: it measures loudness itself with `pcm16Rms`, which returns root-mean-square amplitude normalised to `0.0` to `1.0` and is dependency-free because it runs on every inbound frame of every call. See [Audio](/typescript-sdk/audio).
+
+`EchoGuardOptions` is four optional fields, and each one is read fresh on every call, so any of them can change during the call.
+
+| Option | Default | What it does |
+|---|---|---|
+| `suppressInputDuringPlayback` | on | Exactly `false` turns the whole guard off. |
+| `echoSuppressionWindowMs` | `ECHO_SUPPRESSION_WINDOW_MS`, `600` | How long after your audio finishes playing the guard stays armed. |
+| `echoBargeInRms` | `ECHO_BARGE_IN_RMS`, `0.04` | Loudness an in-window frame must reach to be believed as a real interruption. |
+| `allowBargeIn` | on | Exactly `false` drops the loudness exception and suppresses every in-window frame. |
+
+What the function does, in full:
+
+| State | Outcome |
+|---|---|
+| `suppressInputDuringPlayback: false` | Through. |
+| Outside the playback window | Through. |
+| In window, `allowBargeIn: false` | Dropped, at any loudness. |
+| In window, barge-in allowed, RMS below the threshold | Dropped. |
+| In window, barge-in allowed, RMS at or above the threshold | Through. |
+
+`suppressInputDuringPlayback: false` is a real option, not a test hook. On a headset-only deployment there is no acoustic path from the speaker back into the microphone, so the guard has nothing to catch and every frame it filters is a barge-in the caller does not get. Note that only the literal `false` disables it: an `undefined` from an unset config key leaves the guard on, which is the safe way round.
+
+## A playout clock, not a send clock
+
+A realtime model streams its answer far faster than realtime. Five seconds of speech can be handed over in a fraction of a second, and a call consumes audio at one second per second, so the rest of it is still buffered and still being heard long after the send returned.
+
+So wall-clock send time is useless here. A guard keyed on "did we send something recently" disarms a few hundred milliseconds into a sentence that is still coming out of the caller's speaker, which is the exact moment the echo it exists to catch starts arriving.
+
+`playbackActiveUntil` is therefore the estimated **epoch milliseconds at which the audio you have already sent finishes playing**, and you accumulate it yourself, one duration at a time:
+
+```ts
+this.#playbackEndAt = Math.max(this.#playbackEndAt, Date.now()) + frameDurationMs(frame);
+```
+
+The `Math.max(..., Date.now())` rather than a bare addition is the part worth reading twice. After a gap in speaking, the old horizon is already in the past, and adding to a stale horizon leaves the clock permanently behind real time, so the guard never arms again for the rest of the call and the failure looks like a guard that was never switched on.
+
+Pass `frameDurationMs(frame)` rather than counting frames. Outbound chunk lengths are not fixed, and a frame count drifts against real time in exactly the direction that hurts.
+
+<Warning>
+  It must be `Date.now()`, on the epoch-millisecond scale. `shouldSuppressEcho` compares against `Date.now()` internally, so a horizon built from `performance.now()` sits decades in the past and the guard never fires once. The [group gate](/typescript-sdk/group-calls) takes either clock because it only compares differences; this one does not.
+</Warning>
+
+## No barge-in until the caller's first real turn
+
+Pass `allowBargeIn: false` until the caller has spoken once, and every in-window frame is dropped however loud it is.
+
+That is not a conservative default, it is the specific case. The agent's opening greeting is the first thing on the call, it echoes back, and it is loud, because a greeting is spoken at full volume into a room nobody is talking over yet. Without this rule the loudest possible echo arrives at the exact moment there is no history to compare it against, the agent treats it as a barge-in, interrupts itself, and greets itself again. And again.
+
+Flip the flag where you know a real turn happened: on a finished caller transcript, and on a barge-in your provider reported and you accepted. The method below is **your own**, wired to whatever your provider calls a transcript event, and it is what the SDK's own realtime plugin does on its provider's.
+
+```ts
+#onProviderTranscript(role: "user" | "assistant", text: string) {
+  if (role === "user" && text.trim() !== "") this.#callerTurnStarted = true;
+}
+```
+
+Because the flag is an argument rather than state inside a guard object, it latches in your own field and there is nothing to reset. Note that only the literal `false` withholds barge-in: leave the option out and the loudness exception is on, which is the wrong way round for the first few seconds of a call, so set it explicitly from the start.
+
+## Collapse on an accepted barge-in
+
+When you accept a barge-in you cancel the playback StandIn still holds. Your horizon does not know that. It counted that audio as if the caller would hear all of it, so it is still sitting several seconds in the future.
+
+Left alone, the guard keeps filtering the caller's microphone for the length of the buffer you just threw away, which is precisely the words they interrupted you to say. The caller interrupts, the agent stops, the caller talks, and the agent hears nothing.
+
+```ts
+async #onBargeIn() {
+  await this.#call!.cancelPlayback();   // first: un-send what StandIn still holds
+  this.#aligner.reset();                // the residual belongs to a dead turn
+  this.#playbackEndAt = Date.now();     // the horizon covered audio nobody will hear
+  this.#callerTurnStarted = true;       // this was a real turn
+  this.#provider!.cancelResponse();     // then: stop the model generating more
+}
+```
+
+Do this anywhere you call `cancelPlayback()`, which includes `onGoodbye`: a goodbye cancels playback too, and a horizon left standing after one spends the last seconds of the call filtering the caller's reply to it. See [Barge-in](/typescript-sdk/call-handler#cancelplayback-is-the-barge-in).
+
+<Note>
+  Assigning `Date.now()` is what the SDK's own realtime plugin does, and it leaves the guard armed for one more tail window, `600` ms by default, which is usually what you want: the last already-playing milliseconds are still echoing. The Python SDK's `collapse()` goes further and pulls the horizon to `now - tail_window_ms`, so its guard is disarmed immediately. Subtract `echoSuppressionWindowMs` yourself if you want that exact behaviour.
+</Note>
+
+## The tail belongs to your provider
+
+`echoSuppressionWindowMs` is an option and not a hard constant, and that is a deliberate line. It covers the network and the jitter buffer between you and the caller's speaker, and then however long the provider's own voice detector keeps hearing you after the audio stops. The first part is the wire and is the same for everybody. The second is a property of that provider, and providers differ.
+
+`600` is the default and the value in `ECHO_SUPPRESSION_WINDOW_MS`. Move it with the failure you actually see:
+
+- Too short and the tail of your own sentence gets through as a turn, and the agent answers its own last three words.
+- Too long and a genuine interruption in the moments after you stop speaking is dropped, and the caller has to say it twice.
+
+`echoBargeInRms` is the same kind of knob on the same kind of trade. `0.04` on the `0.0` to `1.0` scale `pcm16Rms` returns. Raise it in a loud room and you buy fewer false barge-ins with a real cost: the case it then gets wrong is a quiet caller trying to interrupt a loud agent, which is the caller who most needs the interruption to work.
+
+Tune both per provider, keep them in your plugin's configuration rather than in its code, and treat the defaults as a starting point that was measured on a call rather than a constant that was derived from one. `EchoGuardOptions` is shaped to be spread straight from a config block, with your per-call `allowBargeIn` layered on top:
+
+```ts
+shouldSuppressEcho(pcm, this.#playbackEndAt, {
+  ...this.#config.echo,
+  allowBargeIn: this.#callerTurnStarted,
+});
+```
+
+## What is not the same in the Python SDK
+
+`StartupBuffer` is the same object in both, with the same caps and the same two lanes. One detail is language-shaped: `dropped` and the resolved value of `release` are objects here, `{ audio, context }`, and tuples there, `(audio, context)`.
+
+The echo guard is genuinely different, and a port that assumes otherwise compiles and then fails on a real call.
+
+| | Python SDK | TypeScript SDK |
+|---|---|---|
+| Shape | `EchoGuard`, a class holding per-call state | `shouldSuppressEcho`, a pure function |
+| Polarity | `allow_input(...)` is `True` to **pass** the frame | `shouldSuppressEcho(...)` is `true` to **drop** it |
+| Input | a loudness float you computed yourself | the PCM16 `Buffer`, measured for you |
+| The playout clock | inside the object, fed by `note_output(duration_ms)` | yours, passed as `playbackActiveUntil` |
+| Clock source | monotonic milliseconds | epoch milliseconds, from `Date.now()` |
+| Accepted barge-in | `collapse()`, disarms immediately | assign the horizon yourself, tail window still armed |
+| First caller turn | `mark_caller_turn()`, a latch on the object | `allowBargeIn`, an option passed per frame |
+| Tail and threshold | `tail_window_ms`, `barge_in_rms`, set once on the constructor | `echoSuppressionWindowMs`, `echoBargeInRms`, read fresh per frame |
+| Disabling it | `EchoGuard(enabled=False)` | `suppressInputDuringPlayback: false` |
+
+The constants are the same in both and carry the same names, `ECHO_SUPPRESSION_WINDOW_MS` at `600` and `ECHO_BARGE_IN_RMS` at `0.04`, so configuration and tests can name them rather than repeat them.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Group calls" icon="users" href="/typescript-sdk/group-calls">
+    The gate that keeps the agent out of a meeting it was not addressed in.
+  </Card>
+  <Card title="Call handler" icon="plug" href="/typescript-sdk/call-handler">
+    A full realtime handler, with the resampling, the alignment and the barge-in.
+  </Card>
+  <Card title="Turn-taking" icon="waveform-lines" href="/typescript-sdk/voice">
+    The other half: an agent built from separate transcription, model and speech.
+  </Card>
+  <Card title="Audio" icon="waveform" href="/typescript-sdk/audio">
+    `frameDurationMs`, `pcm16Rms`, the resampler and the frame aligner.
+  </Card>
+</CardGroup>

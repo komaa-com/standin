@@ -1,0 +1,226 @@
+---
+title: "Sending a picture"
+description: "Attach a picture to a Microsoft Teams message as checked bytes, and turn an agent's MEDIA: marker into one, in the StandIn Python SDK."
+keywords: ["standin outbound image", "teams bot send image python", "MEDIA marker agent framework", "image magic bytes check", "STANDIN_MEDIA_ROOTS"]
+icon: "image"
+---
+
+A reply can carry one picture. It travels as bytes, and every helper on this page exists for the same reason: the thing that chose the picture, the type, the filename or the path is usually a model, and that model is steered by whoever is in the conversation.
+
+<Note>
+This page is about a picture your agent **sends into a chat**. Putting one on the bot's video tile during a call is a different lane with different limits and a different variable: see [Vision and the avatar](/python-sdk/vision).
+</Note>
+
+## Bytes, never a link
+
+```python
+from standin import outbound_image
+
+image = outbound_image(png_bytes, "image/png", name="q3-revenue.png")
+```
+
+`outbound_image(data, content_type, name=None)` returns an `OutboundImage` with three fields: `content_type`, `content_base64`, and an optional `name`. `data` is `bytes`, or a base64 `str` that is decoded strictly. `as_json()` is the wire form, and `build_reply` and `ChatChannel.send` call it for you.
+
+A link is a beacon. An off-domain image loads with no click, under this bot's name, and what it serves can be swapped after anyone looked at it. Bytes can be checked, and the rest of this page is those checks.
+
+Attach one to a message you are posting yourself:
+
+```python
+await chat.send(
+    tenant_id=msg.tenant_id,
+    conversation_id=msg.conversation_id,
+    text="Here is the quarter.",
+    image=image,
+    binding_id=msg.binding_id,
+    idempotency_key=f"{msg.activity_id}:picture",
+)
+```
+
+Or, if you are receiving the relay yourself over the POST lane rather than through `ChatChannel`, put both in one reply:
+
+```python
+from standin import build_reply
+
+reply = build_reply(msg, "Here is the quarter.", image=image)
+```
+
+<Warning>
+A `ChatChannel` handler returns **text**, so a picture goes out as its own message through `chat.send` before you return, and it lands **before** the words. Do not return an empty string afterwards to stop the second message: the channel reads an empty answer as a failed turn and posts `I couldn't come up with an answer to that` behind your picture. Give the picture a caption when you have one, and always return words. If you need the caption and the picture in one message, build the reply yourself with `build_reply`.
+</Warning>
+
+`build_reply(message, text, kind="message", image=None)` is the whole signature, and the image rides the same message as the text. Call it with `kind="typing"` and it drops both: a typing indicator is a state, not a message.
+
+## A declared type is a claim
+
+`outbound_image` runs three checks, in this order.
+
+1. The declared type is one of `OUTBOUND_IMAGE_CONTENT_TYPES`: `image/png`, `image/jpeg`, `image/gif`, `image/webp`. `image/jpg` is normalised to `image/jpeg` first, because it is a common spelling and not a media type. `image/svg+xml` is deliberately absent and is not a gap to fill later: SVG is scriptable XML, which is precisely what an image must not be.
+2. The decoded bytes are at most `OUTBOUND_IMAGE_MAX_BYTES`, which is `1024 * 1024`.
+3. `sniff_image_type(raw)` equals the declared type, or the call raises `ValueError`: `those bytes are not image/png: they look like image/gif`.
+
+The third check is the one that matters. A declared type is a claim made by whatever produced the bytes. Without the signature check, an HTML document or an SVG labelled `image/png` is posted into somebody's chat under this bot's name, and the reader has no reason to distrust it.
+
+Both constants come from the package root, so a check of your own uses the number the SDK uses rather than a copy that drifts:
+
+```python
+from standin import OUTBOUND_IMAGE_CONTENT_TYPES, OUTBOUND_IMAGE_MAX_BYTES
+```
+
+```python
+from standin import sniff_image_type
+
+sniff_image_type(data)  # "image/png", "image/jpeg", "image/gif", "image/webp", or None
+```
+
+| Type | What the bytes must begin with |
+|---|---|
+| `image/png` | `\x89PNG\r\n\x1a\n` |
+| `image/jpeg` | `\xff\xd8\xff` |
+| `image/gif` | `GIF87a` or `GIF89a` |
+| `image/webp` | `RIFF`, and bytes 8 to 11 must be `WEBP` |
+
+That last condition is the reason `sniff_image_type` exists rather than a four-line prefix table. RIFF is a container format, not a picture format: a WAV file also begins `RIFF`, so a RIFF container is accepted only when the bytes themselves say `WEBP`. `RIFF____WAVEfmt ` sniffs as nothing at all, which is the correct answer.
+
+## The filename is a download
+
+```python
+from standin import sanitize_image_name
+
+sanitize_image_name("../../etc/passwd.png")      # "passwd.png"
+sanitize_image_name("C:\\Users\\x\\plan.png")    # "plan.png"
+sanitize_image_name("..")                        # None
+```
+
+`sanitize_image_name(name)` reduces a name to one path-free printable segment, or `None`:
+
+- backslashes are read as separators and only the last segment survives, so no name can carry a path;
+- non-printable characters are dropped, and so are `<`, `>`, `:`, `"`, `|`, `?` and `*`;
+- an empty result, `.` and `..` all become `None`;
+- anything over 200 characters is truncated with its extension kept.
+
+`outbound_image` applies it to the `name` you pass, so you never need to pre-clean one. The reason it is applied at all: the filename reaches a chat as a **download** under this bot's identity, and the model that chose it is being steered by whoever is in the conversation. A name that reads as a path, or that hides its real extension behind unprintable characters, is a name somebody chose for you.
+
+## MEDIA markers
+
+Some agent frameworks let a reply name a file by writing a line like `MEDIA:/tmp/chart.png`, and expect the channel to attach it. The marker is an instruction to the channel, not something anyone should see. A channel that does not understand the convention posts that line as prose, so a caller reads a temporary file path in their chat, and on a call it is worse: text-to-speech reads the path out, character by character.
+
+```python
+from standin import parse_media
+
+media = parse_media(answer)
+media.text   # what to post AND what to say
+media.refs   # ("/tmp/chart.png",), in the order they were written
+```
+
+`parse_media(reply)` returns a frozen `AgentMedia` with exactly those two fields. The text it hands back is what to post **and** what to say, both, always: the whole point is that nobody sees or hears the marker.
+
+The marker is case-insensitive and matches at most once per line: `MEDIA:`, `media:` and `Media: ` all work. It is anchored to the **end** of its line rather than split on whitespace, so `/tmp/a b.png` survives with its space intact, and backticks around the reference are stripped, so a model that formats the path as code still produces a usable one. Removing a line leaves the blank line it sat on, so three or more consecutive newlines collapse to two; a deliberate paragraph break is left alone, because it already is one.
+
+<Warning>
+Because the marker runs to the end of its line, nothing may follow the path there. `MEDIA:/tmp/chart.png and here it is` makes the trailing sentence part of the reference: the words vanish from the reply and `load_media` then fails on a file that does not exist. Put the marker on a line of its own.
+</Warning>
+
+## Only a line that looks like a reference is removed
+
+```python
+parse_media("MEDIA: we should talk to them about it")
+# text unchanged, refs == ()
+```
+
+What follows the marker counts as a reference when it starts with `http://`, `https://`, `/`, `./`, `../` or `~/`, or with a Windows drive letter, or when it ends in `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp`. Everything else is prose, and the whole line stays exactly where it was.
+
+That narrowing is deliberate. Stripping every line that merely begins with the marker eats a sentence like "MEDIA: we should talk to them" out of an answer, and the person who wrote it would never learn why: they would see a reply with a hole in it and no error anywhere.
+
+## Turning a reference into a picture
+
+```python
+from standin import load_media
+
+image = await load_media(ref)                      # or roots=[...], max_bytes=..., name=...
+```
+
+`load_media(ref, *, roots=None, max_bytes=OUTBOUND_IMAGE_MAX_BYTES, name=None)` turns one reference into an `OutboundImage`, through the same checks as everything else here. It raises `ValueError` with a sentence worth reading, because a caller on this path can hand the reason straight back to the agent that supplied the reference.
+
+An `http` or `https` reference is fetched through the SDK's own public-address guard, not with a plain `GET`. A URL an agent chose is untrusted input wearing a trusted costume: `169.254.169.254` is cloud credentials, `127.0.0.1` is whatever else you run, and `10.0.0.0/8` is the rest of your network. The guard accepts http and https only, refuses embedded credentials, rejects any host that resolves into private, loopback, link-local or reserved space, re-checks the address at connect time so a name that answers publicly once and privately a moment later is still refused, and follows at most one redirect hop, putting the target through the whole guard again. The budget is 10 seconds and the same byte cap as the picture it becomes.
+
+<Warning>
+Anything else carrying a scheme is refused **by its own name**: `file:///etc/passwd` raises `file references are not allowed here`, `data:...` raises `data references are not allowed here`, `s3://...` raises `s3 references are not allowed here`. Handing a `file` scheme to a URL fetcher is the usual way around a path guard, and naming the scheme in the refusal is what stops the next reader from assuming it silently fell through to the path branch.
+</Warning>
+
+Whatever arrives, the bytes are sniffed again at the end, and the sniffed type is what gets sent. A content type from a response header, or a file extension, is a claim; the bytes are the fact. A URL served as one type whose bytes are another is refused and the message says both: `that was served as image/png but the bytes are image/gif`. `application/octet-stream` is the one declared type accepted whatever the bytes turn out to be, because it is what it says it is: no claim at all.
+
+<Warning>
+A response with **no** `content-type` header at all is read as `image/jpeg`, so a PNG served bare is refused with `that was served as image/jpeg but the bytes are image/png`. Both SDKs do this. If you control the server, send the real type or `application/octet-stream`; if you do not, fetch it yourself and pass the bytes to `outbound_image`.
+</Warning>
+
+## Local files are off until you name a directory
+
+```bash
+export STANDIN_MEDIA_ROOTS=/srv/charts:/srv/exports
+```
+
+```python
+from standin import MEDIA_ROOTS_ENV, media_roots
+
+MEDIA_ROOTS_ENV                    # "STANDIN_MEDIA_ROOTS"
+media_roots()                      # () until the variable is set
+media_roots(["/srv/charts"])       # or pass them explicitly
+```
+
+`MEDIA_ROOTS_ENV` is exported so a check of your own reads the same variable name the SDK does rather than a copy that drifts, and the TypeScript SDK exports it under the same name. An explicit list wins outright: give one to `media_roots()`, or to `load_media(ref, roots=[...])`, and the environment is not consulted at all on that call.
+
+`media_roots()` reads `STANDIN_MEDIA_ROOTS`, separated by `os.pathsep`, and returns the directories a local reference may be read from. It is **empty by default**, so a local reference is unavailable until an operator opts in, and until then `load_media` refuses with `sending a local file is off until a directory is named in STANDIN_MEDIA_ROOTS`.
+
+That default is the whole point. An agent can be talked into writing `MEDIA:/etc/passwd`, and the answer to that has to be a refusal rather than a file read followed by an upload into somebody's chat.
+
+Four details make the guard hold once a root is named:
+
+- `~` is expanded and each root is resolved through symlinks. A root that does not exist is dropped, because it cannot contain anything.
+- The file is resolved through symlinks too, so it is judged by where it lands rather than by how it is spelled. A symlink sitting inside a root that points at a file outside it is refused.
+- The prefix compare is separator-terminated. Without that, `/srv/shared-evil` passes for `/srv/shared`.
+- The size is read with a `stat` **before** the file is opened. The point of a cap is not to load it.
+
+Putting the two halves together in a handler:
+
+```python
+from standin import InboundMessage, load_media, parse_media
+from standin.log import logger
+
+
+async def on_message(msg: InboundMessage) -> str:
+    media = parse_media(await agent.answer(msg.text))
+
+    for ref in media.refs:
+        try:
+            image = await load_media(ref)
+        except ValueError as err:
+            # Worth logging: the agent chose this reference, and the reason is
+            # a sentence it can act on next turn.
+            logger.warning("standin: could not attach %s: %s", ref, err)
+            continue
+        await chat.send(
+            tenant_id=msg.tenant_id,
+            conversation_id=msg.conversation_id,
+            text="",  # the words follow, in what this handler returns
+            image=image,
+            binding_id=msg.binding_id,
+            idempotency_key=f"{msg.activity_id}:{ref}",
+        )
+
+    # A reply that was ONLY a marker leaves media.text empty, and the channel
+    # reads an empty answer as a failed turn. Never return the empty string.
+    return media.text or "Here it is."
+```
+
+`logger` is not re-exported at the package root: it lives in `standin.log`, and it is the same logger the SDK writes its own lines to.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Chat" icon="comments" href="/python-sdk/chat">
+    The lane a picture travels on, and what it echoes back.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/python-sdk/configuration">
+    Every variable the SDK reads, including the roots above.
+  </Card>
+</CardGroup>

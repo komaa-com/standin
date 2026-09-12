@@ -1,0 +1,247 @@
+---
+title: "Turn-taking"
+description: "VoiceLane, utterance segmentation, WAV handling and paced playback for an agent that is not a realtime model, in the StandIn TypeScript SDK."
+keywords: ["voice activity detection Microsoft Teams", "utterance segmentation", "paced PCM playback", "barge-in", "WAV to PCM16", "VoiceLane turn-taking"]
+icon: "waveform-lines"
+---
+
+A realtime speech-to-speech provider is handed the caller's audio and hands audio back, and the turn-taking is theirs. Everything else is not like that.
+
+A transcription service wants one utterance at a time. A language model wants text. A text-to-speech engine hands back a whole buffer that somebody has to feed out at the rate a call consumes it. That shape is the same whichever three services you pick.
+
+<Note>
+  A realtime plugin needs none of this and pays nothing for it. `voice.ts` is a module you do not import.
+</Note>
+
+## One utterance per phrase
+
+A Microsoft Teams call delivers audio continuously: silence is still frames, fifty a second. `UtteranceSegmenter` is the gate between that and a service that wants a phrase.
+
+```ts
+import { UtteranceSegmenter } from "@komaa/standin-sdk";
+
+const segmenter = new UtteranceSegmenter();
+
+async onCallerAudio(pcm: Buffer) {
+  const utterance = segmenter.feed(pcm);
+  if (utterance !== undefined) await transcribe(utterance);
+}
+```
+
+Five bounds, and each exists because of a specific failure.
+
+| Bound | Default | Why |
+|---|---|---|
+| `speechRms` | `0.02` | The loudness at which a frame counts as speech rather than room noise, on the 0.0 to 1.0 scale `pcm16Rms` returns. Nothing else opens the gate, so this is the first knob to reach for on a bad line. Raise it on a noisy room, where air conditioning or a fan holds the gate open and every utterance runs to the ceiling. Lower it for a quiet caller on a poor microphone, whose speech never trips it and who is never heard at all. |
+| `silenceMs` | `800` | A pause inside a sentence is not the end of one. Too short and the agent interrupts a thinking caller; too long and it feels slow. |
+| `prerollMs` | `240` | The syllable that trips the gate is part of the word. Without it every utterance begins mid-consonant and the transcript loses the first word of most sentences. |
+| `minUtteranceMs` | `120` | A cough is not a turn. Sending one costs a request and returns nothing worth answering. Judged on the loud part alone, so the pre-roll and the trailing silence cannot carry a click over the floor. |
+| `maxUtteranceMs` | `30000` | A stuck-open microphone or a television in the room never goes quiet, and without a cap one utterance grows for the whole call. |
+
+Every default is an exported constant, so a test can assert against the value rather than retype it:
+`DEFAULT_SPEECH_RMS`, `DEFAULT_SILENCE_MS`, `DEFAULT_PREROLL_MS`, `DEFAULT_MIN_UTTERANCE_MS`,
+`DEFAULT_MAX_UTTERANCE_MS`.
+
+`flush()` takes what is held mid-utterance, for teardown. `reset()` abandons it, for a barge-in.
+`speaking` is true while the caller is mid-utterance right now.
+
+<Note>
+This gate answers "did the caller stop talking?". It does not answer "was that the caller at all?".
+On a speakerphone the agent's own voice comes back up the caller leg loudly enough to clear any
+`speechRms` you would want to set, and the fix is a time window against the playout clock rather
+than a louder gate. See
+[Realtime providers](/typescript-sdk/realtime-providers#the-agent-answering-itself), which applies
+here too whenever the caller is not on a headset.
+</Note>
+
+## The WAV a speech engine hands back
+
+It is rarely the one you wanted: 32-bit float, 44.1 kHz, stereo, or wrapped in `WAVE_FORMAT_EXTENSIBLE`, which ffmpeg emits even for plain PCM. Every one of those plays as noise on a call unconverted, and the header does not make the failure obvious.
+
+```ts
+import { decodeWav, encodeWav } from "@komaa/standin-sdk";
+
+const pcm = decodeWav(await tts.speak(text)); // PCM16 mono at the call's rate
+```
+
+Chunks are walked rather than assumed at a fixed offset, because a real encoder puts `LIST` and `fact` chunks before the data and a fixed offset reads them as samples. Stereo is averaged rather than halved, so whoever is on the right channel is not lost. Floats outside the range are clamped, because wrapping is the loudest possible click.
+
+`encodeWav` goes the other way, for a transcription service that will not take raw PCM.
+
+## Playing it back
+
+A text-to-speech engine returns a whole utterance at once. A call takes 20 milliseconds every 20 milliseconds. Sending the buffer in one go hands the service seconds of audio it must queue, and that queue is what makes a barge-in arrive too late to matter: the caller interrupts, the model stops, and the bot keeps talking for the length of what was already sent.
+
+```ts
+import { PacedPlayback } from "@komaa/standin-sdk";
+
+const playback = new PacedPlayback((pcm) => session.sendAudio(pcm));
+const result = await playback.say(pcm);
+if (result.interrupted) { /* ... */ }
+```
+
+The pacing is on an **absolute clock**. Sleeping 20 ms per frame accumulates every scheduling delay, and a minute of speech ends seconds behind where it should be. This one sleeps until the next frame is due, so a late frame is followed by a short sleep rather than a full one.
+
+The second constructor argument is the frame size in milliseconds, `FRAME_MS` by default, and the
+byte size follows from it. `playing` is true while a buffer is going out.
+
+`cancel()` stops what is playing, and is safe to call from a receive loop. Turns are serialised, so two cannot interleave into one stream the caller hears as both at once. The result carries `sentMs` against `totalMs`, which is the difference between "I told them" and "I started to".
+
+## One object that runs the whole turn
+
+The three pieces above are the parts. `VoiceLane` is the assembly: one per call, fed the caller's frames, responsible for everything between a frame arriving and an answer being heard.
+
+```ts
+import { VoiceLane, type CallSession } from "@komaa/standin-sdk";
+
+class MyHandler {
+  #lane!: VoiceLane;
+
+  async onStart(session: CallSession) {
+    this.#lane = new VoiceLane(session, myStt, myAgent, myTts);
+  }
+
+  async onCallerAudio(pcm: Buffer) {
+    await this.#lane.feed(pcm);
+  }
+
+  async aclose(reason: string) {
+    await this.#lane.aclose();
+  }
+}
+```
+
+`feed` never blocks and never throws. It runs on the receive path of a live call, so the turn it starts is detached: awaiting a model there stops frames arriving, and a lane that has stopped hearing the caller cannot notice an interruption.
+
+### The three callables
+
+| You supply | It is given | It returns |
+|---|---|---|
+| `transcribe` | one whole utterance, PCM16, 16 kHz, mono `Buffer` | the words, as `Promise<string>`. Empty or whitespace means nothing was said |
+| `answer` | that transcript | the answer as `Promise<string>`, or an `AsyncIterable<string>` of pieces |
+| `synthesize` | one piece of answer text | speech as PCM16, 16 kHz, mono: `Promise<Buffer>`, or an `AsyncIterable<Buffer>` of chunks |
+
+Each half of that contract carries its weight.
+
+`transcribe` is handed a phrase, not frames. Working out where the caller stopped is the segmenter's job above, and it is the one part of this a transcription service will not do for you.
+
+Its empty return is a signal rather than a failure. It is how you say "there were no words in that", and the lane acts on it.
+
+`answer` returning a plain string is the simple case. Returning an async iterable is what gets the first sentence out before the last one exists. The lane tells the two apart at runtime, so a callable is free to return either without a flag to configure.
+
+`synthesize` returns PCM at the call's rate, because what comes back goes straight to paced playback. Nothing in the lane decodes a WAV for you: run `decodeWav` over it first if your engine returns one, and `resamplePcm16` if it speaks at 24 kHz.
+
+### The awkward parts
+
+**One turn at a time.** A new utterance retires the turn in flight before it starts its own. An agent asked two questions at once answers neither well, and both answers would be spoken over each other. JavaScript cannot cancel a promise, so the older turn is retired by generation: each turn carries a number, a new utterance bumps it, and the turn checks that number again before it speaks the answer. The retired turn runs to completion, and the answer it comes back with is never spoken. Whatever it had already started playing is dropped as the new turn begins. Nothing cancels your callables, so a request that is already in flight is still paid for, and whatever one of them holds open is released by its own `finally` rather than by the lane. The Python twin cancels the task instead, because asyncio can.
+
+**Barge-in lands when the interruption starts, not when it ends.** The moment the caller's voice opens over the top of an answer, the buffered audio is dropped and StandIn is told to drop what it still holds. Waiting for that utterance to finish would spend the whole of it talking at somebody who has stopped listening, which is the difference between a call that feels alive and one that does not. `bargeIn()` is public, for an interruption the caller's audio does not show:
+
+```ts
+async onGoodbye(text: string) {
+  await this.#lane.bargeIn();
+  await this.#lane.say(text);
+}
+```
+
+**A silence is not a turn.** An utterance that transcribes to nothing ends there. The agent is never asked and nothing is spoken. The segmenter opens on any loud frame, so a cough, a door or a second of traffic reaches the transcriber, and waking the agent for every one of them is a bill and a caller being answered at random. Note the difference from the case below: an empty transcript is silent, a transcriber that fails says so out loud.
+
+### Nothing throws into the call
+
+A step that fails is logged, and the caller hears a sentence.
+
+| When | What is spoken |
+|---|---|
+| `transcribe` fails | `TROUBLE_HEARING`, "Sorry, I did not catch that." |
+| `answer` fails | `TROUBLE_ANSWERING`, "Sorry, I am having trouble answering just now." |
+| `synthesize` fails | `TROUBLE_SPEAKING`, "Sorry, I am having trouble speaking just now." |
+
+Silence is the one thing a caller cannot interpret. Somebody on a phone call cannot tell a broken transcriber from an agent that is thinking, so they wait, and then they hang up.
+
+`TROUBLE_SPEAKING` goes back through your own `synthesize`, once. The retry is guarded, because an engine that is down cannot say the sentence about being down, and the lane goes quiet rather than looping on it.
+
+All three are exported from `@komaa/standin-sdk`, so a test can assert on the sentence itself.
+
+### A long answer, spoken as it is written
+
+Return an async iterable from `answer` and each piece is synthesized and played as it arrives.
+
+```ts
+async function* myAgent(heard: string) {
+  for await (const sentence of llm.stream(heard)) yield sentence;
+}
+```
+
+The caller hears the beginning of a long answer while the rest is still being written, which is the whole point: a model that takes four seconds to finish a paragraph leaves four seconds of silence otherwise.
+
+Yield whole sentences. Each piece is one `synthesize` call and one spoken buffer, so a token at a time is a synthesis request per word and speech chopped into syllables. Pieces that are blank are skipped. An interruption stops the loop, and what was never reached is never synthesized and never spoken. The generation is re-checked before each piece, so a stream that has been superseded goes quiet at the next piece rather than at the end of the answer. Leaving the loop closes the generator, so a `finally` inside it still runs.
+
+### Saying a line nobody asked for
+
+A greeting, a handover, something that arrived from outside the call.
+
+```ts
+const turn = await lane.say("Thanks for taking the call.");
+```
+
+`say` skips `answer` and goes straight to synthesis and paced playback, so the line can be interrupted like any other answer, and it queues behind whatever is already speaking rather than overlapping it. It returns the `VoiceTurn`, which is how you find out whether it was heard to the end. It does not supersede a turn in flight, so call `bargeIn()` first when the line has to come before what is being said.
+
+### Closing the lane
+
+`aclose()` drops the buffered audio, resets the segmenter, retires the turn in flight and waits for it to settle. Nothing cancels a request that is already in flight, so that wait is as long as your slowest step has left to run. Call it from your handler's `aclose`, once.
+
+After that, `feed` is a no-op rather than an error. Frames keep arriving for a moment after teardown begins, and the end of a call is the worst place to start throwing from the receive path.
+
+### What each turn leaves behind
+
+`VoiceTurn` is the record of one exchange: `heard`, `said`, `interrupted` and `error`. `interrupted` is not a failure. It is the most common way a real conversation goes.
+
+Pass `onTurn` to receive one per caller turn the agent answered, and you have a transcript for free:
+
+```ts
+import { VoiceLane, type VoiceTurn } from "@komaa/standin-sdk";
+
+const remember = (turn: VoiceTurn) => {
+  transcript.add(callerName, turn.heard);
+  transcript.add("Assistant", turn.said, "assistant");
+};
+
+const lane = new VoiceLane(session, myStt, myAgent, myTts, { onTurn: remember });
+```
+
+It is a plain function, not an async one, and it is called inline at the end of a turn, so keep it short. An exception it throws is swallowed: a plugin's own bookkeeping must not end a call.
+
+A turn the transcriber or the agent failed is spoken but not reported, so this is a record of the conversation rather than a count of what went wrong. An answer that came back empty is not reported either, because nothing was said. Nor is a line from `say`: it hands you its `VoiceTurn` as the return value instead, so a greeting is missing from a transcript built only from `onTurn`.
+
+A synthesis failure is the one that does reach it, with the trouble sentence as `said` and the engine's message in `error`. `error` is `undefined` on a turn that went through cleanly, so check it before filing a turn as something the agent meant to say.
+
+Three more things on the options object and the lane itself. `segmenter` takes an `UtteranceSegmenter` you tuned yourself, with the five bounds above. `speaking` is true while audio is going out, and `busy` covers the whole turn, including the model's own thinking. `turn` is the promise for the turn in flight, or `undefined`, for a test or a teardown that wants to let one finish.
+
+## What this page does not cover
+
+Two more shared lanes sit next to this one and are worth knowing exist before you write them
+yourself.
+
+- **The echo guard.** On a speakerphone the agent's own voice comes back in, the model's voice
+  detection hears it, and the agent answers itself in a loop. `shouldSuppressEcho` is what stops it,
+  on a playout clock rather than a wall clock. See
+  [Realtime providers](/typescript-sdk/realtime-providers#the-agent-answering-itself).
+- **The meeting gate.** In a group call the prior question is whether to answer at all. `GroupGate`
+  decides, and is inert on a 1:1 call. See [Group calls](/typescript-sdk/group-calls).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Audio" icon="waveform" href="/typescript-sdk/audio">
+    `resamplePcm16`, `FrameAligner` and `pcm16Rms`, which this lane is built on.
+  </Card>
+  <Card title="Group calls" icon="users" href="/typescript-sdk/group-calls">
+    Deciding which finished utterance was even meant for the agent.
+  </Card>
+  <Card title="Realtime providers" icon="bolt" href="/typescript-sdk/realtime-providers">
+    The other shape: one provider owning the whole turn.
+  </Card>
+  <Card title="Meeting recap" icon="file-lines" href="/typescript-sdk/minutes">
+    What to do with the `VoiceTurn` stream `onTurn` hands you.
+  </Card>
+</CardGroup>

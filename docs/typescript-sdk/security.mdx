@@ -1,0 +1,285 @@
+---
+title: "Security"
+description: "The two StandIn HMAC lanes, their replay windows, who may call the agent, and how the TypeScript SDK fails closed."
+keywords: ["HMAC SHA256", "signHandshake", "signBody", "replay window", "StandIn secret", "inbound call allowlist", "webhook signature"]
+icon: "shield"
+---
+
+StandIn authenticates with one shared secret and HMAC-SHA256. There are **two lanes**, they sign
+different things, and they are not interchangeable.
+
+| Lane | Signs | Window the SDK enforces | Header |
+|---|---|---|---|
+| v1 handshake | `"{timestampMs}.{id}"`, where `id` is the channel name or the `callId` | 60 s, fixed | `X-StandIn-Signature` |
+| v1 body | `"{timestampMs}."` followed by the exact body bytes | 300 s by default, overridable | `X-StandIn-Signature` |
+| v2 request | `"{timestampMs}."` followed by `METHOD\npath\nsha256(body)` | 60 s | `X-StandIn-Signature-V2` |
+
+The timestamp always travels in `X-StandIn-Timestamp`, in milliseconds. Signatures are lowercase hex.
+
+There are three signers, not two. The body signer and the request signer carry different headers and
+sign different things, and collapsing them loses the distinction that makes v2 worth having.
+
+Their windows differ too, and the difference is the one people get wrong. The **body** lane allows
+300 seconds because a relay retry is legitimately delayed. The **request** lane is verified inside
+the 60 second handshake window, because a control request is sent and answered immediately. The only
+v2 verifier in this SDK is the call-outcome route on `CallServer`, so a worker whose clock is more
+than a minute out rejects call outcomes exactly as it rejects calls.
+
+<Warning>
+Both lanes are real and both are correct. The WebSocket lane signs the **channel or call name**; the
+POST relay signs the **body**. Never present one as a fix for the other, and never "correct" a
+handshake signer into a body signer. They protect different things.
+</Warning>
+
+## Signing helpers
+
+```ts
+import {
+  REPLAY_WINDOW_MS,       // 60000
+  CHAT_REPLAY_WINDOW_MS,  // 300000
+  SIGNATURE_HEADER,       // "x-standin-signature"
+  SIGNATURE_V2_HEADER,    // "x-standin-signature-v2"
+  TIMESTAMP_HEADER,       // "x-standin-timestamp"
+  nowMs,
+} from "@komaa/standin-sdk";
+```
+
+Import a window rather than retyping `300000`. The header constants hold **lowercase** strings here
+because Node lowercases incoming header names, while the Python SDK's constants of the same names
+hold the canonical casing. HTTP header names are case-insensitive, so the wire is identical and only
+the constant's spelling differs.
+
+The four signer and verifier signatures:
+
+```ts
+signHandshake(secret, timestampMs, handshakeId): string
+verifyHandshake(secret, timestamp, handshakeId, signature, currentMs?): boolean
+
+signBody(secret, timestampMs, rawBody): string
+verifyBody(secret, timestamp, rawBody, signature, currentMs?, windowMs?): boolean
+
+canonicalRequest(method, path, rawBody): string   // "METHOD\npath\nsha256_hex(body)"
+signRequest(secret, timestampMs, method, path, rawBody): string
+```
+
+`currentMs` exists so a test can pin the clock. `windowMs` on `verifyBody` defaults to
+`CHAT_REPLAY_WINDOW_MS`.
+
+## Lane 1: the WebSocket handshake
+
+```ts
+import { signHandshake, verifyHandshake, nowMs } from "@komaa/standin-sdk";
+
+// Inbound: StandIn dials your call listener. CallServer does this for you.
+const ok = verifyHandshake(secret, timestampHeader, callId, signatureHeader);
+
+// Outbound: your worker dials the chat channel. ChatChannel does this for you.
+const signature = signHandshake(secret, nowMs(), "chat");
+```
+
+The payload is the literal string `` `${timestampMs}.${handshakeId}` ``. For an inbound call the
+`handshakeId` is the `callId` from the URL path, which is why `session.callId` is trustworthy: it is
+the value the signature covered, not something a caller supplied. A `session.start` body naming a
+different `callId` is refused, because that is either a bug or an attempt to ride one call's signature
+into another call's session.
+
+For the outbound chat dial the `handshakeId` is the literal channel name, `"chat"`. That is the
+inbound handshake scheme running in the opposite direction, and it is deliberately not the body
+signer: the POST relay lane signs the body instead, and the two must not be "fixed" into each other.
+
+The window is 60 seconds in both directions. Handshakes are dialed and answered immediately, so
+anything older is a replay. A worker whose clock has drifted past a minute will see every call
+rejected with 401, and that is usually what a sudden total 401 means.
+
+## Lane 2: body and request signatures
+
+```ts
+import { signBody, verifyBody, canonicalRequest, signRequest } from "@komaa/standin-sdk";
+
+// v1 body signature: `{timestampMs}.{rawBody}`
+const sig = signBody(secret, nowMs(), rawBody);
+const ok = verifyBody(secret, timestampHeader, rawBody, signatureHeader);
+
+// v2: binds the method and path as well as a hash of the body
+canonicalRequest("POST", "/api/calls", rawBody); // "POST\n/api/calls\n<sha256 hex>"
+const v2 = signRequest(secret, nowMs(), "POST", "/api/calls", rawBody);
+```
+
+Sign the **exact bytes you transmit**. Serialize once, sign that string or buffer, and send the same
+one. Re-serializing between signing and sending changes key order or whitespace and the signature
+stops verifying, which is the single most common plugin bug on this lane.
+
+v2 is preferred for control requests: binding the method and path means a validly signed body cannot
+be replayed against a different endpoint. The path is the request path only, without origin or query
+string. `/api/calls` above is the real one, and
+[`OutboundCaller`](/typescript-sdk/reaching-people) already signs it for you, so you only reach for
+`signRequest` when you are writing a control client of your own.
+
+## How both lanes fail closed
+
+- Missing secret, timestamp or signature returns `false`. There is no permissive path.
+- The timestamp must be ASCII decimal. `Number()` alone would accept empty strings, hexadecimal and
+  exponent notation.
+- Comparison is constant time, with a length check first. `timingSafeEqual` throws on a length
+  mismatch, and this code is reachable by anyone who can open a socket, so an unguarded compare would
+  turn a short signature header into a 500 instead of a 401: both a crash path and an oracle that
+  tells "malformed" apart from "wrong".
+
+That length check is this language's guard rather than a rule of the scheme; the Python SDK needs a
+different one for `hmac.compare_digest`. Both SDKs fail closed, both restrict the timestamp to ASCII
+decimal, and the shared conformance vectors assert that a signature produced by either verifies in
+the other, byte for byte.
+
+## The replay guard
+
+A correctly signed upgrade replayed inside the freshness window must not open a second socket, so
+`CallServer` keeps every accepted handshake fingerprint single-use.
+
+Two details in that guard are worth knowing, because both were bugs waiting to happen:
+
+- The fingerprint uses the **normalized** signature. Verification accepts case and whitespace variants,
+  so keying on the raw header would let the same capture replay once per casing.
+- Entries are aged by the **signing** timestamp, never by arrival time. Verification accepts a
+  timestamp up to the window in the future, so an entry aged from arrival could be pruned while its
+  signature was still valid, reopening the exact replay the guard exists to close.
+
+Pruning runs on a time throttle rather than a size watermark, and only correctly signed, not-yet-seen
+handshakes ever reach the map, so it tracks StandIn's real call rate rather than attacker traffic.
+
+## Handling the secret
+
+- Keep it in the environment, or in your platform's secret store.
+- `STANDIN_SECRET` is what `CallServer` and `OutboundCaller` read. The chat lane reads
+  `STANDIN_CHAT_SECRET` **first** and falls back to `STANDIN_SECRET`, so a deployment issued a
+  separate chat credential can run the two lanes on different keys without touching either
+  constructor. With one key for both, leave `STANDIN_CHAT_SECRET` unset. Every variable the SDK reads
+  is listed on [Configuration](/typescript-sdk/configuration).
+- Never commit it, never log it, and never put it in a URL or query string.
+- Rotate it in the StandIn portal. A rotated secret takes effect on the next handshake, so live calls
+  finish on the old one.
+- If a config layer can hand you an unresolved reference, coerce a non-string to the empty string
+  rather than calling `String()` on it. `String({})` yields `"[object Object]"`, a non-empty and
+  guessable secret that a naive presence check would accept.
+
+## Who may call the agent
+
+The handshake authenticates the **socket**, not the human. It proves the call came from StandIn.
+`session.start` then names a caller, and whether that caller may be answered is a different question
+with a different answer: it is your deployment's policy.
+
+The decision stays yours. The **matcher** is in the SDK, so every plugin makes it the same way:
+
+```ts
+import {
+  describeInboundRejection,
+  isInboundCallAllowed,
+  type CallSession,
+} from "@komaa/standin-sdk";
+
+async onStart(session: CallSession) {
+  const from = session.start.caller.aadId;
+  if (!isInboundCallAllowed(config.inboundPolicy, config.allowFrom, from)) {
+    logger.warn(describeInboundRejection(config.inboundPolicy, from));
+    await session.end("not-allowed");
+    return;
+  }
+}
+```
+
+| Function | What it does |
+|---|---|
+| `isInboundCallAllowed(policy, allowFrom, from)` | `"open"` admits everyone; `"allowlist"` and `"pairing"` consult the list; anything else, including `undefined`, refuses. |
+| `isAllowlistedCaller(from, allowFrom)` | True on an exact caller id match, case-insensitive, **or** a digits-only phone number match. |
+| `normalizePhoneNumber(input)` | Digits only. |
+| `describeInboundRejection(policy, from)` | The log line to print, naming the policy and the fix. |
+
+Three things are worth carrying from the code:
+
+**An unset or unknown policy refuses.** Defaulting the other way would mean a configuration typo
+silently opens the agent to anyone who can reach the number.
+
+**The id branch is what makes a Microsoft Teams caller allowlistable at all.** Their id is an AAD
+object id, not a phone number, and phone normalization reduces it to the empty string, which matches
+nothing. That is why the matcher tries both rather than normalizing everything.
+
+**`caller.aadId` is empty for guest and anonymous callers**, so an anonymous caller can never match an
+allowlist. That is the intended outcome, not a gap.
+
+<Note>
+This module is TypeScript only, and it is a real difference between the SDKs rather than a
+documentation gap. The Python SDK ships no policy module: a Python worker writes the same test in its
+own handler, and the Python call-handler page shows it that way.
+</Note>
+
+## The outbound fetch guard
+
+An agent that can show the caller a picture will sooner or later be handed a URL by its own model,
+and that model is steered by whoever is on the call. So the URL is untrusted input wearing a trusted
+costume, and a plain `GET` of it is a server-side request forgery: `169.254.169.254` is cloud
+credentials, `127.0.0.1` is whatever else you run, and `10.0.0.0/8` is the rest of your network.
+
+```ts
+import { assertPublicHttpUrl, fetchPublicImage, isForbiddenIp } from "@komaa/standin-sdk";
+```
+
+| Name | What it does |
+|---|---|
+| `await assertPublicHttpUrl(url)` | Resolves to a `URL`, or throws naming the problem: a scheme that is not http or https, embedded credentials, no host, or a host that resolves into forbidden space. |
+| `isForbiddenIp(address)` | The address test on its own, for a check of your own. Private, loopback, link-local, carrier-grade NAT, multicast and reserved ranges, and an IPv4 address wearing an IPv6 spelling is judged as the address it embeds. |
+| `await fetchPublicImage(url, maxBytes)` | The whole guarded fetch, which is what the vision tools use. Bounded on total time, declared length, streamed length and redirects. |
+
+The subtle half is the rebind. Validating a hostname resolves it once, and the resolution the HTTP
+client does a moment later can answer differently, so the address the socket **actually** connects to
+is re-checked against the same rules. One redirect hop is followed, because image CDNs habitually
+redirect to the real asset, and the target goes through the whole guard again rather than being
+trusted for having come from a host that passed.
+
+Link-local is on the list by name, because that is where cloud metadata lives.
+
+<Note>
+These three are top-level exports here. In the Python SDK they live in `standin.fetch` rather than on
+the barrel. See [Vision and the avatar](/typescript-sdk/vision#fetching-an-image-a-model-chose) for
+the image case.
+</Note>
+
+## The generated wire builders
+
+The frame builders and parsers are public, because the wire is public, and they are what the shared
+conformance vectors assert across both languages: `audioFrame`, `sessionEnd`, `pong`,
+`assistantCancel`, `parseMessage`, `parseSessionStart` and `decodePcm`. All of them are on the barrel
+here; in the Python SDK only `assistant_cancel` is, and the other six are
+`from standin.protocol import ...`.
+
+`contextSentences` sits with them on the barrel and is the one that has no Python symbol at all: the
+same three sentences exist there, word for word, but they are built inside the Python call server
+rather than exposed as a helper. So a test that asserts on the exact wording can import it here and
+has to retype it there.
+
+A handler should still not reach for them. `CallServer` owns the sequence number and the outbound
+timeline, and a hand-built frame is how those two stop agreeing.
+
+## Transport and limits
+
+Terminate TLS in front of the worker. The signature proves origin and freshness, it does not encrypt
+anything, and the audio on the wire is unencrypted PCM inside the WebSocket frame.
+
+A single inbound message is bounded at 2 MB on both the call and chat lanes, and a call-outcome POST
+is bounded at 8 KB. A malformed URL, a bad percent escape, or an unparseable frame rejects that one
+request and never escapes to kill the process.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call server" icon="server" href="/typescript-sdk/call-server">
+    Admission order, the replay guard in place, and the watchdogs.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/typescript-sdk/configuration">
+    Every `STANDIN_` variable, including both secrets.
+  </Card>
+  <Card title="Chat" icon="comments" href="/typescript-sdk/chat">
+    The outbound dial, and the cross-tenant guard on every reply.
+  </Card>
+  <Card title="Reaching people" icon="phone-volume" href="/typescript-sdk/reaching-people">
+    The outbound allowlist, which is stricter than any inbound one.
+  </Card>
+</CardGroup>

@@ -1,0 +1,243 @@
+---
+title: "Turn-taking"
+description: "VoiceLane, utterance segmentation, WAV handling and paced playback for an agent that is not a realtime model, in the StandIn Python SDK."
+keywords: ["voice activity detection Microsoft Teams", "utterance segmentation", "paced PCM playback", "barge-in", "WAV to PCM16", "VoiceLane turn-taking"]
+icon: "waveform-lines"
+---
+
+A realtime speech-to-speech provider is handed the caller's audio and hands audio back, and the turn-taking is theirs. Everything else is not like that.
+
+A transcription service wants one utterance at a time. A language model wants text. A text-to-speech engine hands back a whole buffer that somebody has to feed out at the rate a call consumes it. That shape is the same whichever three services you pick.
+
+<Note>
+  A realtime plugin needs none of this and pays nothing for it. `standin.voice` is a module you do not import.
+</Note>
+
+## One utterance per phrase
+
+A Microsoft Teams call delivers audio continuously: silence is still frames, fifty a second. `UtteranceSegmenter` is the gate between that and a service that wants a phrase.
+
+```python
+from standin import UtteranceSegmenter
+
+segmenter = UtteranceSegmenter()
+
+async def on_caller_audio(self, pcm):
+    utterance = segmenter.feed(pcm)
+    if utterance is not None:
+        text = await transcribe(utterance)
+```
+
+A loudness floor and four bounds, and each exists because of a specific failure. Every default is exported, so a plugin that wants to nudge one can say which one it changed.
+
+| Argument | Default | Why |
+|---|---|---|
+| `speech_rms` | `DEFAULT_SPEECH_RMS`, `0.02` | The loudness floor that decides what counts as speech at all, on the same 0.0 to 1.0 scale [`pcm16_rms`](/python-sdk/audio#pcm16-rms) returns. The knob most likely to need tuning on a noisy line: too high and a quiet caller is never heard, too low and the room opens the gate. |
+| `silence_ms` | `DEFAULT_SILENCE_MS`, `800` | A pause inside a sentence is not the end of one. Too short and the agent interrupts a thinking caller; too long and it feels slow. |
+| `preroll_ms` | `DEFAULT_PREROLL_MS`, `240` | The syllable that trips the gate is part of the word. Without it every utterance begins mid-consonant and the transcript loses the first word of most sentences. |
+| `min_utterance_ms` | `DEFAULT_MIN_UTTERANCE_MS`, `120` | A cough is not a turn. Sending one costs a request and returns nothing worth answering. Low on purpose: a single short word is 150 ms of voice and has to survive, while a click is a frame or two. |
+| `max_utterance_ms` | `DEFAULT_MAX_UTTERANCE_MS`, `30000` | A stuck-open microphone or a television in the room never goes quiet, and without a cap one utterance grows for the whole call. |
+
+`min_utterance_ms` is measured on the **loud part alone**, from the frame that opened the gate to the last loud frame. Measuring the whole buffer would count the pre-roll and the trailing silence, which together are over a second at these defaults, so the floor could never fire and every click would reach the transcriber.
+
+`segmenter.speaking` is true while the caller is mid-utterance. `flush()` takes what is held mid-utterance, for teardown. `reset()` abandons it, for a barge-in.
+
+## The WAV a speech engine hands back
+
+It is rarely the one you wanted: 32-bit float, 44.1 kHz, stereo, or wrapped in `WAVE_FORMAT_EXTENSIBLE`, which ffmpeg emits even for plain PCM. Every one of those plays as noise on a call unconverted, and the header does not make the failure obvious.
+
+```python
+from standin import decode_wav, encode_wav
+
+pcm = decode_wav(await tts.speak(text))   # PCM16 mono at the call's rate
+```
+
+Chunks are walked rather than assumed at a fixed offset, because a real encoder puts `LIST` and `fact` chunks before the data and a fixed offset reads them as samples. Stereo is averaged rather than halved, so whoever is on the right channel is not lost. Floats outside the range are clamped, because wrapping is the loudest possible click. Eight-bit WAV is read as unsigned and centred on 128, which read as signed is a square wave of noise.
+
+`decode_wav` raises `ValueError` on anything it cannot read, naming what it found. It is the one helper on this page that does raise, because a buffer that is not a WAV at all is a configuration mistake rather than a glitch, and playing it would be noise on a live call.
+
+`encode_wav(pcm, sample_rate_hz=SAMPLE_RATE_HZ)` goes the other way, for a transcription service that will not take raw PCM. Pass the rate when you are wrapping something that is not at the call's.
+
+## Playing it back
+
+A text-to-speech engine returns a whole utterance at once. A call takes 20 milliseconds every 20 milliseconds. Sending the buffer in one go hands the service seconds of audio it must queue, and that queue is what makes a barge-in arrive too late to matter: the caller interrupts, the model stops, and the bot keeps talking for the length of what was already sent.
+
+```python
+from standin import PacedPlayback
+
+playback = PacedPlayback(session.send_audio)
+result = await playback.say(pcm)
+if result.interrupted:
+    ...
+```
+
+The pacing is on an **absolute clock**. Sleeping 20 ms per frame accumulates every scheduling delay, and a minute of speech ends seconds behind where it should be. This one sleeps until the next frame is due, so a late frame is followed by a short sleep rather than a full one.
+
+`playing` is true while a buffer is going out. `cancel()` stops it, and is safe to call from a receive loop. Turns are serialised, so two cannot interleave into one stream the caller hears as both at once.
+
+The result is a `Playback`: `sent_ms` against `total_ms`, which is the difference between "I told them" and "I started to", plus `interrupted` and the `complete` property that is its inverse.
+
+<Note>
+`complete` exists in Python only. The TypeScript `Playback` carries `sentMs`, `totalMs` and `interrupted` and nothing else, so a check ported between the languages has to be written as `!interrupted` there.
+</Note>
+
+## One object that runs the whole turn
+
+The three pieces above are the parts. `VoiceLane` is the assembly: one per call, fed the caller's frames, responsible for everything between a frame arriving and an answer being heard.
+
+```python
+from standin import CallSession, VoiceLane
+
+
+class MyHandler:
+    async def on_start(self, session: CallSession) -> None:
+        self.lane = VoiceLane(
+            session,
+            transcribe=my_stt,
+            answer=my_agent,
+            synthesize=my_tts,
+        )
+
+    async def on_caller_audio(self, pcm: bytes) -> None:
+        await self.lane.feed(pcm)
+
+    async def aclose(self, reason: str) -> None:
+        await self.lane.aclose()
+```
+
+`feed` never blocks and never raises. It runs on the receive path of a live call, so the turn it starts is detached: awaiting a model there stops frames arriving, and a lane that has stopped hearing the caller cannot notice an interruption.
+
+### The three callables
+
+| You supply | It is given | It returns |
+|---|---|---|
+| `transcribe` | one whole utterance, PCM16, 16 kHz, mono | the words, as `str`. Empty or whitespace means nothing was said |
+| `answer` | that transcript | the answer as `str`, or an async iterator of pieces |
+| `synthesize` | one piece of answer text | speech as PCM16, 16 kHz, mono `bytes`, or an async iterator of chunks |
+
+Each of those contracts is there for a reason.
+
+`transcribe` is handed a phrase, not frames. Working out where the caller stopped is the segmenter's job above, and it is the one part of this a transcription service will not do for you.
+
+Its empty return is a signal rather than a failure. It is how you say "there were no words in that", and the lane acts on it.
+
+`answer` returning a plain string is the simple case. Returning an async iterator is what gets the first sentence out before the last one exists. The lane tells the two apart at runtime, so a callable is free to return either without a flag to configure.
+
+`synthesize` returns PCM at the call's rate, because what comes back goes straight to paced playback. Nothing in the lane converts for you, and the two cases are different:
+
+- **A WAV goes through `decode_wav` and nothing else.** It handles the sample rate, the channel count and the sample format in one step, and returns PCM16 mono at the call's rate already.
+- **Raw PCM at another rate goes through `resample_pcm16`.** That is the case where an engine hands back bare samples at 22.05 or 24 kHz.
+
+<Warning>
+Do not run both over a WAV. `decode_wav` has already resampled, so resampling its output again as if it were still 24 kHz produces a pitch-shifted buffer two thirds the length it should be, and the header gives no hint that anything went wrong.
+</Warning>
+
+### The awkward parts
+
+**One turn at a time.** A new utterance cancels the turn in flight before it starts its own. An agent asked two questions at once answers neither well, and both answers would be spoken over each other. The superseded turn stops where it stands, and whatever it had not yet spoken is never spoken. Whichever of your three callables was running is cancelled at its next `await`, so release anything it holds open in a `finally`.
+
+**Barge-in lands when the interruption starts, not when it ends.** The moment the caller's voice opens over the top of an answer, the buffered audio is dropped and StandIn is told to drop what it still holds. Waiting for that utterance to finish would spend the whole of it talking at somebody who has stopped listening, which is the difference between a call that feels alive and one that does not. `barge_in()` is public, for an interruption the caller's audio does not show:
+
+```python
+async def on_goodbye(self, text: str) -> None:
+    await self.lane.barge_in()
+    await self.lane.say(text)
+```
+
+**A silence is not a turn.** An utterance that transcribes to nothing ends there. The agent is never asked and nothing is spoken. The segmenter opens on any loud frame, so a cough, a door or a second of traffic reaches the transcriber, and waking the agent for every one of them is a bill and a caller being answered at random. Note the difference from the case below: an empty transcript is silent, a transcriber that fails says so out loud.
+
+### Nothing raises into the call
+
+A step that fails is logged, and the caller hears a sentence.
+
+| When | What is spoken |
+|---|---|
+| `transcribe` raises | `TROUBLE_HEARING`, "Sorry, I did not catch that." |
+| `answer` raises | `TROUBLE_ANSWERING`, "Sorry, I am having trouble answering just now." |
+| `synthesize` raises | `TROUBLE_SPEAKING`, "Sorry, I am having trouble speaking just now." |
+
+Silence is the one thing a caller cannot interpret. Somebody on a phone call cannot tell a broken transcriber from an agent that is thinking, so they wait, and then they hang up.
+
+`TROUBLE_SPEAKING` goes back through your own `synthesize`, once. The retry is guarded, because an engine that is down cannot say the sentence about being down, and the lane goes quiet rather than looping on it.
+
+All three are exported from `standin`, so a test can assert on the sentence itself.
+
+### A long answer, spoken as it is written
+
+Return an async iterator from `answer` and each piece is synthesized and played as it arrives.
+
+```python
+async def my_agent(heard: str):
+    async for sentence in llm.stream(heard):
+        yield sentence
+```
+
+The caller hears the beginning of a long answer while the rest is still being written, which is the whole point: a model that takes four seconds to finish a paragraph leaves four seconds of silence otherwise.
+
+Yield whole sentences. Each piece is one `synthesize` call and one spoken buffer, so a token at a time is a synthesis request per word and speech chopped into syllables. Pieces that are blank are skipped. An interruption stops the loop, and what was never reached is never synthesized and never spoken.
+
+### Saying a line nobody asked for
+
+A greeting, a handover, something that arrived from outside the call.
+
+```python
+async def on_start(self, session: CallSession) -> None:
+    self.lane = VoiceLane(session, my_stt, my_agent, my_tts)
+    await self.lane.say("Thanks for taking the call.")
+```
+
+`say` skips `answer` and goes straight to synthesis and paced playback, so the line can be interrupted like any other answer, and it queues behind whatever is already speaking rather than overlapping it. It returns the `VoiceTurn`, which is how you find out whether it was heard to the end. It does not supersede a turn in flight, so call `barge_in()` first when the line has to come before what is being said.
+
+### Closing the lane
+
+`aclose()` drops the buffered audio, resets the segmenter, cancels the turn in flight and waits for it to unwind. Call it from your handler's `aclose`, once.
+
+After that, `feed` is a no-op rather than an error. Frames keep arriving for a moment after teardown begins, and the end of a call is the worst place to start raising from the receive path.
+
+### What each turn leaves behind
+
+`VoiceTurn` is the record of one exchange: `heard`, `said`, `interrupted` and `error`. `interrupted` is not a failure. It is the most common way a real conversation goes.
+
+Pass `on_turn` to receive one per caller turn the agent answered, and you have a transcript for free:
+
+```python
+from standin import VoiceLane, VoiceTurn
+
+
+def remember(turn: VoiceTurn) -> None:
+    transcript.add(caller_name, turn.heard)
+    transcript.add("Assistant", turn.said, role="assistant")
+
+
+lane = VoiceLane(session, my_stt, my_agent, my_tts, on_turn=remember)
+```
+
+It is a plain function, not a coroutine, and it is called inline at the end of a turn, so keep it short. An exception it raises is swallowed: a plugin's own bookkeeping must not end a call.
+
+A turn the transcriber or the agent failed is spoken but not reported, so this is a record of the conversation rather than a count of what went wrong. An answer that came back empty is not reported either, because nothing was said. Nor is a line from `say`: it hands you its `VoiceTurn` as the return value instead, so a greeting is missing from a transcript built only from `on_turn`.
+
+A synthesis failure is the one that does reach it, with the trouble sentence as `said` and the engine's message in `error`. Check `error` before filing a turn as something the agent meant to say.
+
+Three more things on the constructor and the object. `segmenter` takes an `UtteranceSegmenter` you tuned yourself, with the floor and the four bounds above. `speaking` is true while audio is going out, and `busy` covers the whole turn, including the model's own thinking. `turn` is the in-flight `asyncio.Task`, or `None`, which is how a test or a teardown lets one finish.
+
+<Note>
+A superseded turn is **cancelled** here, at its next `await`. The TypeScript twin cannot do that, because a promise cannot be cancelled, so it retires the older turn by generation number and lets it run to completion: a request already in flight there is still paid for and still has to release its own resources in a `finally`. Both are correct for their language, and a plugin ported between them has to know which it is getting.
+</Note>
+
+## What this page does not cover
+
+Two more shared lanes sit next to this one and are worth knowing exist before you write them yourself.
+
+- **The echo guard.** On a speakerphone the agent's own voice comes back in, the model's voice detection hears it, and the agent answers itself in a loop. `EchoGuard` is the thing that stops it, on a playout clock rather than a wall clock. See [Realtime providers](/python-sdk/realtime-providers#the-agent-answering-itself).
+- **The meeting gate.** In a group call the prior question is whether to answer at all. `GroupGate` decides, and is inert on a one-to-one call. See [Group calls](/python-sdk/group-calls).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Audio" icon="waveform" href="/python-sdk/audio">
+    `pcm16_rms`, the resampler and the frame aligner these bounds are measured with.
+  </Card>
+  <Card title="Call tools" icon="wrench" href="/python-sdk/call-tools">
+    Giving the agent behind this lane something to do besides talk.
+  </Card>
+</CardGroup>

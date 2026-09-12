@@ -1,0 +1,493 @@
+---
+title: "Troubleshooting"
+description: "The failures a StandIn worker actually produces: a silent HMAC mismatch, an unreachable worker, a probe that lies, a bot that answers every turn of a meeting, an agent that answers itself, and the five timers that end a call."
+keywords: ["StandIn troubleshooting","HMAC handshake failed","secret mismatch","worker clock skew 401","agent is not reachable","curl http1.1 websocket 404","no-agent-answered","GroupGate wake phrase","echo guard speakerphone","STANDIN_OUTBOUND_ALLOW","503 at capacity","port 9442","STANDIN_SECRET","Graph error 7505"]
+---
+
+Work top to bottom: secret, reachability, address, then how the agent behaves once calls do connect,
+then limits. Most first-call failures are one of the first two, and both of them are silent by
+design.
+
+## The bot joins but never speaks (HMAC mismatch)
+
+**Symptom:** the bot joins the call, then nothing. No greeting, no reply, no error in your worker's
+logs.
+
+`STANDIN_SECRET` must **byte-match** the secret registered for your identity in StandIn. A mismatch
+fails the handshake and the connection is dropped, so both sides look healthy while no audio flows.
+This is the number one first-call issue.
+
+It is silent on purpose. An endpoint that explains why it rejected you is an endpoint that helps an
+attacker, so the worker answers `401` and says nothing more.
+
+**Fix:**
+
+- Re-paste the secret on both sides. Watch for a trailing newline picked up when copying, and for
+  shell quoting that eats characters such as `$` or `!`. Prefer single quotes:
+  `export STANDIN_SECRET='...'`.
+- Confirm the variable actually reaches the process. `STANDIN_SECRET` is read at construction, so a
+  value exported in a different shell, or set after the worker started, does nothing.
+- The secret is **not** re-read hot. Restart the worker after changing it. A rotated secret takes
+  effect on the next handshake, so live calls finish on the old one and the next call in uses the
+  new one. Nothing has to be re-registered and no support request is needed.
+- **Check the worker's clock.** The handshake signs a timestamp alongside the `callId`, and both
+  SDKs refuse one more than **60 seconds** away from their own clock, in either direction, before
+  they compare signatures at all. A host whose clock has drifted, or a container resumed from a
+  suspended image, therefore answers `401` to every call while holding a byte-perfect secret.
+  `verify_handshake` / `verifyHandshake` fails closed and says nothing, so this looks exactly like a
+  mismatch. Compare `date -u` against a known good source, and run a time sync service. The window
+  and why it is that tight are in Security ([Python](/python-sdk/security),
+  [TypeScript](/typescript-sdk/security)).
+
+## Bot does not join: "agent is not reachable"
+
+**Symptom:** the call never gets a bot, and the portal says the agent is not reachable.
+
+StandIn dials **your worker** from the internet. If it cannot reach your `wss://` endpoint, there is
+nothing to bridge to and no bot joins.
+
+**Fix, in order:**
+
+1. **Does your own handler answer at all?** Run the install check before you suspect the network.
+   It binds an ephemeral listener on loopback, speaks the real call wire to your handler, streams a
+   few frames and reports whether audio came back, with no tunnel, no provider bill and no
+   Microsoft tenant involved. A worker that fails there was never going to answer a real call, and
+   no amount of tunnel debugging changes that. See Checking the install
+   ([Python](/python-sdk/checking-the-install), [TypeScript](/typescript-sdk/checking-the-install)).
+2. **Is the worker running?** Start it and confirm the startup line naming its bind address and
+   path. `curl -s http://127.0.0.1:9442/healthz` should answer `{"ok": true, "calls": 0}`.
+3. **Is the bind reachable?** `STANDIN_HOST=127.0.0.1` is invisible from the internet unless a
+   tunnel forwards to it. Either keep the tunnel in front, or bind `0.0.0.0` behind an ingress.
+4. **Is the tunnel up?** A dropped tunnel is the most common cause after the secret. Restart it and
+   test the public URL from outside your network.
+5. **Does the registered URL match?** The agent calling URL in StandIn must point at the live
+   endpoint, including the path. See [Expose your agent](/expose).
+
+## A voice endpoint probes as 404 through a funnel
+
+**Symptom:** `tailscale funnel status` shows the rule, the worker is running, and a curl probe with
+WebSocket headers still returns `404`, which looks exactly like a missing mount.
+
+This is an **HTTP/2 false negative**. The probe is wrong, not the endpoint.
+
+Tailscale Funnel serves HTTP/2 to the client, and HTTP/2 has no connection-level upgrade. Over h2
+your `Connection: Upgrade` and `Upgrade: websocket` headers never travel as a handshake: what
+reaches the worker is an ordinary `GET`, and a TypeScript worker answers that `404` because nothing
+but an upgrade belongs on that path. So the `404` is about the probe, not about the mount.
+
+A Python worker answers the same degraded probe `401`, because it verifies the signature before it
+looks at the upgrade. That is the more dangerous outcome: it looks like a pass. It does prove the
+mount reaches your worker, and it proves nothing about whether the tunnel forwards a real upgrade,
+which is the only thing a call needs from it.
+
+Force HTTP/1.1 either way, and include a call id segment:
+
+```bash
+curl -si --http1.1 \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  https://<machine>.<tailnet>.ts.net/msteams/calling/probe | head -1
+```
+
+`401` is the healthy answer: the route exists and refused an unsigned probe.
+
+<Warning>
+**The bare path 404s on a healthy worker.** The SDK registers the route as
+`/msteams/calling/{callId}`, so `/msteams/calling` with no segment has no route at all. A path mount
+forwards everything underneath it, so the `/probe` segment reaches the worker either way.
+</Warning>
+
+<Warning>
+**A plain `GET` is not a health check for calls, and its status code differs by SDK.** With a
+call-id segment and no upgrade, a healthy worker on loopback answers `401` in Python and `404` in
+TypeScript: the Python listener verifies the signature before it ever looks at the upgrade, and the
+TypeScript listener only ever routes upgrades there. Neither is a liveness signal. Use
+`GET /healthz` at the root of the call port for liveness, and the upgrade probe above for routing.
+</Warning>
+
+## Wrong port or path
+
+| | Default | Environment variable |
+|---|---|---|
+| Call listener port | `9442` | `STANDIN_PORT` |
+| Bind address | `0.0.0.0` | `STANDIN_HOST` |
+| Call path | `/msteams/calling` | `STANDIN_WS_PATH` |
+
+A URL registered with a stale port, or with the path dropped by the proxy target, connects to
+nothing and the call never reaches your agent. Register the public `wss://` URL, never the local
+`ws://` bind. With a path mount there is no port in the value; with a whole-port tunnel there is,
+and you have to type it correctly everywhere, which is one of several reasons to prefer the path
+mount.
+
+<Note>
+Each call carries its own `callId`, and the handshake signs it per call. You never configure a
+`callId`. If logs show signature failures for one specific `callId`, that is still the shared
+secret, not the id.
+</Note>
+
+## Calls connect but the bot talks over the caller
+
+**Symptom:** the caller interrupts, the model stops generating, and the bot keeps talking for
+another second or two anyway.
+
+Your handler cancelled the response upstream without cancelling the playback. Audio already handed
+to StandIn is still queued at the service, and nothing upstream can reach it.
+
+**Fix:** call `cancel_playback()` / `cancelPlayback()` **first**, then cancel the provider:
+
+<CodeGroup>
+```python Python
+await session.cancel_playback()   # un-send what StandIn still holds
+await provider.cancel_response()  # then stop the model generating more
+```
+
+```typescript TypeScript
+await session.cancelPlayback();   // un-send what StandIn still holds
+await provider.cancelResponse();  // then stop the model generating more
+```
+</CodeGroup>
+
+It is the only wire-level lever that un-sends buffered audio. See
+[Dialogue modes](/concepts/modes#barge-in-works-the-same-either-way).
+
+## The last word of every turn is clipped
+
+**Symptom:** replies sound fine except that the final syllable is missing, consistently, on every
+turn.
+
+A resampled buffer does not divide evenly into the wire's 640-byte frame, and the remainder is being
+dropped. Use `FrameAligner` and flush it at the end of a turn rather than discarding the tail. This
+is exactly why the aligner is in the SDK: see
+[Architecture](/concepts/architecture#audio-and-why-the-helpers-are-in-the-sdk).
+
+## The bot answers every turn of a meeting
+
+**Symptom:** in a 1:1 call the agent behaves. Invited to a meeting, it replies to everything anybody
+says, and the meeting cannot continue until somebody mutes or removes it.
+
+The group gate is not doing anything. `GroupGate` keeps the agent quiet until somebody addresses it
+by a wake phrase, then leaves the floor open for a follow-up window, 12 seconds by default, so the
+next sentence does not need the name again. A 1:1 call always answers. Two mistakes switch the gate
+off without looking like they did:
+
+- **No wake phrase configured.** A gate with nothing that can open it would mute the agent for the
+  whole call, so a gate whose phrase list is empty treats itself as off and answers everything.
+  Configure the phrases your callers will actually say.
+- **Deciding "is this a group call?" from the participant count.** A participant count never
+  arrives on the meeting-join path, so a gate that waits for one is dead on exactly the calls it
+  exists for, and the failure reads as a gate that was never switched on. The signal that does
+  arrive is the thread id: Microsoft's id for a meeting or channel conversation begins `19:`, and
+  it is in `session.start` on every call. Pass it as `thread_id` / `threadId` when you build the
+  gate, and treat `note_participants()` / `noteParticipants()` as corroboration only. It can add
+  certainty; it must never remove it.
+
+Group calls ([Python](/python-sdk/group-calls), [TypeScript](/typescript-sdk/group-calls)) has the
+gate, the follow-up window and the verbal interrupts in full.
+
+## The agent answers itself, and the caller cannot get a word in
+
+**Symptom:** the caller is on a speakerphone, or on a laptop with no headset. The agent says
+something, then answers itself, then answers that, in a loop, with the caller silent throughout,
+until somebody hangs up.
+
+The agent's own voice is coming out of the caller's speaker and back into the caller's microphone.
+It arrives at your handler as caller audio, the provider's voice detection hears a finished turn,
+and the model replies to it. This is not a subtle degradation: the call has been taken over.
+
+**Fix:** run the echo guard over inbound frames. It keeps a playout clock, and that is the part
+worth understanding: wall-clock send time is useless here, because a realtime model streams audio
+far faster than realtime, so a guard keyed on "when did we last send" disarms in the middle of the
+sentence it exists to cover. The guard accumulates the **duration** of what was sent instead, and
+while that playout is still likely to be audible it drops inbound audio unless the frame is loud
+enough to be a person really interrupting: `ECHO_BARGE_IN_RMS`, `0.04`, with a tail of
+`ECHO_SUPPRESSION_WINDOW_MS`, 600 ms, for the network and jitter buffer between you and their
+speaker.
+
+Until the caller's first real turn, no barge-in is allowed at all, because the opening greeting
+echoing back is exactly the loud thing that would otherwise make the agent interrupt and re-greet
+itself. In Python the guard tracks that itself once you call `mark_caller_turn()`; in TypeScript you
+pass `allowBargeIn: false` until the caller has spoken.
+
+The two SDKs are genuinely different shapes here, and a port that assumes otherwise runs and then
+fails on a real call: Python has an `EchoGuard` class that owns its clock, TypeScript has
+`shouldSuppressEcho`, a pure function whose answer is inverted, `true` meaning drop the frame, and
+whose playout horizon you keep yourself on the epoch-millisecond scale. Realtime providers
+([Python](/python-sdk/realtime-providers), [TypeScript](/typescript-sdk/realtime-providers)) has
+both, side by side.
+
+## The caller's first sentence never reaches the agent
+
+**Symptom:** the agent opens by asking something the caller already answered. Or the group gate
+never engages, or a recording gate never opens, even though the context did arrive.
+
+A call starts the moment StandIn dials. Your agent starts a little later: a socket has to open, a
+room has to be joined, a provider session has to be configured. Everything the caller does in that
+gap still arrives, and if nothing holds it, it is gone. People start talking the instant a call
+connects, and the first thing they say is often the reason they called. The "there are three people
+here, stay quiet unless addressed" sentence and the recording-status change land in the same gap.
+
+**Fix:** hold what arrives and release it when the agent is ready. `StartupBuffer` keeps caller
+audio and call context in two lanes, preserves order within each, and releases audio **before**
+context, because the provider needs the words in the order they were said and the context is a note
+about the call rather than part of the conversation.
+
+It is bounded on purpose: `MAX_PENDING_AUDIO` is 200 frames, about four seconds of speech, and
+`MAX_PENDING_CONTEXT` is 20 lines. It drops the **oldest** rather than the newest, so if something
+has to be lost it is the stale audio rather than what just happened, and a socket that never opens
+cannot grow a buffer for the length of the call. Log `dropped` when it is not zero: it means your
+startup took longer than the buffer covers, which is a different problem from the one this fixes.
+Realtime providers ([Python](/python-sdk/realtime-providers),
+[TypeScript](/typescript-sdk/realtime-providers)) has the buffer and its release order.
+
+## The call ends by itself after about 45 seconds
+
+That is the caller-audio idle watchdog, and it is doing its job: a live call that has stopped
+carrying caller audio is a call nobody is on. If it is firing during real conversation, caller audio
+is not arriving, which usually means the media path degraded rather than that the timer is wrong.
+
+The related timers are a 10 s pre-start watchdog, for a socket that authenticated and never sent
+`session.start`, and a 15 s `on_start` timeout, for a handler whose startup hangs. A handler that
+routinely needs longer than 15 s to be ready should return from `on_start` early and finish warming
+up in the background.
+
+Five timers can end a call on their own. The other two have their own sections below, because they
+look nothing like this one: the unanswered-call reaper at about two minutes, and the call-duration
+ceiling you set yourself.
+
+## The bot joins, stays silent, and the call drops after about two minutes
+
+**Symptom:** the call connected, the caller talked the whole time, the agent never said anything,
+and at around 120 seconds the call ends. The close reason is `no-agent-answered`, and your log
+carries the line that names the call. Each SDK prints the timer in its own unit, so grep for
+`nothing answered call` rather than for a number: Python logs
+`standin: nothing answered call <id> within 120s; ending it` and TypeScript logs the same sentence
+with `within 120000ms`.
+
+Nothing ever answered the call. This is the gap none of the other watchdogs cover: the pre-start
+watchdog is satisfied because `session.start` arrived, the `on_start` timeout is satisfied because
+`on_start` returned, and the idle watchdog is satisfied because the **caller** is still talking. No
+audio ever went out, which is what a dispatch that never lands, or a provider session that never
+opened, looks like from the listener's side.
+
+**Fix:** the cause is on your side of the seam, so find out why the agent produced no audio.
+Sending audio counts as answering, so a handler that speaks at all is covered without doing
+anything. A plugin that answers by a route the listener cannot see, joining a room or handing the
+call to a provider, has to say so: call `session.mark_answered()` / `session.markAnswered()` when
+the **agent's own** audio track appears, not when any participant connects. Monitors, recorders and
+avatar workers all connect, and none of them is an agent answering.
+
+The timer is `stale_call_reaper_seconds`, default `120.0`, and `staleCallReaperMs`, default
+`120_000`. Two minutes either way, but the names carry their unit and a value copied across the two
+SDKs unchanged is off by a thousand: `staleCallReaperMs: 120` reaps every call within a quarter of a
+second of connecting. `0` disables it in both, and disabling it is rarely what you want: it only ever
+frees a call that is already lost, and it costs nothing on a call that was answered.
+
+## The call ends politely at a fixed time
+
+**Symptom:** the call ends at the same elapsed time every time, and the caller hears a closing line
+first, by default "We are out of time on this call, so I have to stop here. Goodbye." The close
+reason is `call-duration-limit`.
+
+That is the call-duration ceiling, `max_call_seconds` / `maxCallMs`. It is **off by default**, so
+if you are seeing it, you or your plugin's configuration set it. It is a hard ceiling measured from
+`session.start`, and it is a different thing from the idle watchdog: idle ends a call that went
+quiet, this one ends a call that is still going. The caller who will not hang up, the model looping
+at itself and the automated system that dialled and never stopped talking all bill a provider by
+the minute for as long as the socket lives, and none of them trips a silence check.
+
+The line is `goodbye_text` / `goodbyeText`, delivered through the handler's `on_goodbye`, the same
+callback StandIn's own closing line uses, so no plugin needs new code to honour it. Playback is
+flushed first, or the line would queue behind whatever audio is still in flight and the call would
+end before anyone heard it. How long it has to finish is `goodbye_grace`, default `6.0`, and
+`goodbyeGraceMs`, default `6000`: six seconds either way, and the name carries the unit here too.
+
+## Calls are refused with 503
+
+The worker is draining, or every slot is taken. Both are deliberate: a worker that refuses a call it
+cannot serve beats one that accepts it and half-serves it. Capacity is checked **before any
+signature work**, so a flood of calls you were never going to take costs no crypto.
+
+The ceiling is `max_connections` / `maxConnections`, **64** by default. It is a constructor argument
+and not an environment variable, so raising it is a code change and no `STANDIN_` setting will do
+it: call server ([Python](/python-sdk/call-server),
+[TypeScript](/typescript-sdk/call-server)). Watch `GET /healthz` for the live call count to see a
+drain finish.
+
+A `409` instead means that call id already has a live session, which happens if a previous socket
+for the same call has not finished tearing down.
+
+## Voice works, chat is silent, and nothing appears in any log
+
+The diagnosis depends on which world you are in, and the two are opposites.
+
+**On the consolidated SDK**, the chat lane is dialed **out** by `ChatChannel`, so there is no mount
+to get wrong and no inbound request to lose. An empty log means the channel was never started, or it
+failed to open. Check that you called `start()` on it, that a secret is set in that process too, and
+that your identity is a managed connection: the chat lane exists only for those. The lane reads
+`STANDIN_CHAT_SECRET` first and falls back to `STANDIN_SECRET`, so a managed connection that issued
+a separate chat key needs that key here. Unset `STANDIN_CHAT_SECRET` rather than blanking it: in
+TypeScript an exported empty string counts as set and shadows a perfectly good `STANDIN_SECRET`, so
+the channel refuses to start at all, while in Python the blank falls through and the lane opens. Then
+look for the `standin: chat channel open` line at startup. Without it, nothing is connected.
+
+**On a standalone bridge**, chat arrives as an ordinary `POST` to a path you publish. If your tunnel
+has no rule for it, the tunnel answers `404` at its own edge and the request never reaches a process
+that writes logs, while voice keeps working the whole time on a different rule. The empty log is the
+diagnosis: look at `tailscale funnel status`, not at the agent. Those paths belong to that bridge
+rather than to this SDK, which is why they are not on this site.
+
+## The bot answers calls but ignores Microsoft Teams chat (DM pairing)
+
+**Symptom:** voice works end to end, the message reaches your agent, and the bot never replies.
+
+Your agent declined to act on it. Both runtimes gate direct messages from senders they do not know,
+and this is their gate rather than StandIn's.
+
+**OpenClaw: closed by default, and silent.** With `dmPolicy: pairing`, DMs from unapproved senders
+are dropped and a pairing request is queued without telling the sender. List and approve:
+
+```bash
+openclaw pairing list msteams
+openclaw pairing approve msteams <CODE>
+```
+
+**Hermes: gated too, but visible by default.** With no allowlist, an unknown sender gets a pairing
+code back instead of an answer. Approve it once:
+
+```bash
+hermes pairing approve teams <CODE>
+```
+
+Hermes goes silent only when `TEAMS_ALLOWED_USERS` (or the global `GATEWAY_ALLOWED_USERS`) is set:
+unlisted senders are then dropped with an unauthorized-user warning and no pairing code is offered.
+
+<Note>
+Hermes rate-limits pairing replies to one per sender per 10 minutes, so a rapid second test message
+getting no answer is expected. Wait, or approve the code you already have.
+</Note>
+
+## A picture is refused on its way into a chat
+
+**Symptom:** the agent tries to attach an image and gets an error back instead, so the reply arrives
+without it, or not at all.
+
+Every outbound picture is checked before it is sent, and there are three messages, each meaning
+something different:
+
+| What you get | Why |
+|---|---|
+| `cannot be sent inline; it must be one of image/png, image/jpeg, image/gif, image/webp` | Only those four raster types may be rendered inline. `image/jpg` is normalised to `image/jpeg` first, so that spelling is never the cause. `image/svg+xml` is deliberately absent and is not a gap to be filled later: SVG is scriptable XML, which is precisely what an image must not be. |
+| `that image is <n> bytes, over the 1048576 limit` | Decoded bytes are capped at `OUTBOUND_IMAGE_MAX_BYTES`, 1 MiB. Re-encode or downscale rather than raising it. |
+| `those bytes are not image/png: they look like image/gif` | The declared type is a claim made by whatever produced the bytes; the signature is what they are. Without this check an HTML document or an SVG labelled `image/png` gets posted into somebody's chat under your bot's name. |
+
+A local file has one gate before all three. Reading one is off until you name a directory, and until
+you do, `sending a local file is off until a directory is named in STANDIN_MEDIA_ROOTS` is the
+answer. A path outside those roots is refused with `that file is outside the directories this worker
+may read`, with symlinks resolved first, because the path reaching that call was chosen by a model
+somebody else is steering.
+
+Sending a picture ([Python](/python-sdk/sending-pictures),
+[TypeScript](/typescript-sdk/sending-pictures)) covers the checks and the filename rules. For a
+picture arriving the other way, see chat attachments
+([Python](/python-sdk/chat-attachments), [TypeScript](/typescript-sdk/chat-attachments)).
+
+## An outbound call is refused before it rings
+
+**Symptom:** the agent says it cannot call somebody, and no phone rings anywhere.
+
+That is the outbound policy, and it is working. Everything that can be refused is refused **before**
+the call is placed, so a refusal never leaves somebody's phone ringing for a message that was
+rejected. Each refusal is one sentence, safe to read out loud:
+
+| What comes back | Why |
+|---|---|
+| `outbound calling is off: set STANDIN_OUTBOUND_ALLOW to the directory ids this agent may ring` | The allowlist is empty, which is the default. Outbound calling stays off until you list somebody. |
+| `that person is not on this agent's outbound allowlist` | The target is not on the list. Matching is case-folded on both sides, so a case mismatch is not what you are looking at. |
+| `an outbound call needs the person's directory id` | No target at all reached the policy. |
+| `this agent has already placed 6 calls in the last hour` | `STANDIN_OUTBOUND_MAX_PER_HOUR`, default `6`, counted over a rolling hour across all targets. `0` means no cap, which is a choice rather than a default. |
+
+**Fix:** put the directory id in `STANDIN_OUTBOUND_ALLOW`, comma separated, and restart the worker.
+The list is read when the policy is built.
+
+This list is separate from any inbound allowlist, and stricter, because the two answer different
+questions. Inbound asks whether a person may talk to the agent, and that person chose to dial.
+Outbound asks whether the agent may ring a person, and the agent was talked into it by whoever is on
+the call. An agent with an outbound tool and no allowlist is an agent that can be talked into
+cold-calling your directory. Reaching people ([Python](/python-sdk/reaching-people),
+[TypeScript](/typescript-sdk/reaching-people)) has the rest of the lane.
+
+## Community tier: bot leaves or will not join (daily budget)
+
+The community tier is metered: **5 minutes of bot time per day, per room**, and up to **5 new rooms
+per day** per account. When a room's budget runs out the bot leaves and returns the next day. Reusing
+an existing room does not count toward the room cap.
+
+The cutoff is **abrupt**: at the 5-minute mark the bot leaves immediately, even mid-sentence, with
+no warning. A bot that "hung up out of nowhere" at around five minutes is the budget, not a fault.
+
+The same daily budget applies to a **free identity**, per identity. "The next day" flips at
+**midnight UTC**, not your local midnight, which is why a bot can work again "early in the morning"
+or "only after lunch" without anything having changed.
+
+## Community tier: the bot cannot join a meeting in your own tenant
+
+**Symptom:** instead of using the generated link, you try to get the shared bot into one of **your
+own** Microsoft Teams meetings, and no bot ever joins, with no visible error.
+
+This is a Microsoft Graph restriction, not a StandIn fault. A bot can only join meetings hosted in
+**its own tenant**; cross-tenant joins are rejected with error **7505**, an authorization tenant
+mismatch. The shared community bot lives in StandIn's tenant, so it can never join a meeting created
+in yours.
+
+**Fix:** use **Generate meeting link** in your sandbox room and share that link. The meeting is
+created where the bot is allowed to operate, and anyone joins it as a guest. If you need a bot that
+answers calls in **your own** tenant, that is the standard setup with your own Microsoft Teams bot: see the
+[quickstart](/quickstart).
+
+## A package name will not resolve
+
+There are two package names, one per language, and everything ships inside them:
+
+```bash
+pip install standin-sdk          # Python, imported as standin
+npm install @komaa/standin-sdk   # TypeScript
+```
+
+Framework support is an extra or a subpath of those, never a separate package:
+`standin-sdk[livekit]`, `standin-sdk[hermes-agent]`, `@komaa/standin-sdk/openclaw`.
+
+Two Python extras gate a shipped capability rather than a framework, and a base install hits a
+missing dependency the first time it uses one: `standin-sdk[tile]` encodes frames for the avatar
+tile, and `standin-sdk[render]` draws a document onto that tile. Office formats additionally need
+LibreOffice on `PATH`, which is not something pip can fetch. `standin-sdk[all]` pulls all of them in
+at once.
+
+The older standalone bridges were published under their own names. Each is superseded by the
+plugin of the same name in this SDK, which is where new work goes.
+
+<Tip>
+Still stuck? Re-read the [quickstart](/quickstart) end to end. Most remaining issues are a variable
+that never reached the process, or a Graph permission that was never admin-consented.
+</Tip>
+
+## Contact support
+
+Include the `callId` from your worker's logs, which SDK and plugin you are running, and roughly when
+the call happened. We do not keep transcripts, so that context is what we work from.
+
+{/* The address is written "user [at] domain" on purpose: the rendered HTML then contains no "@"
+    and no "mailto:", so address-harvesting crawlers - which match a plain email regex - find
+    nothing on this page.
+
+    A runtime step DOES exist - Mintlify auto-includes any .js file on every page, which is how
+    cloudflare-analytics.js injects its beacon - so this address is left static by choice rather
+    than by necessity: a link assembled in script is still a link in the DOM, and it breaks for a
+    reader with scripting off. The separator is deliberately NOT aria-hidden - hiding it would have
+    a screen reader say "supportkomaa.com". Do not "tidy" this into a normal mailto: link. */}
+
+<Note>
+  **Support: support [at] komaa.com**
+
+  StandIn is operated by Komaa DigiTech. For privacy requests and data-subject rights, see the
+  [Privacy Statement](https://standin.komaa.com/privacy).
+</Note>

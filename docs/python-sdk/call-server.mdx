@@ -1,0 +1,309 @@
+---
+title: "CallServer"
+description: "Every CallServer constructor option in the StandIn Python SDK, and the failure each one defends against."
+keywords: ["standin callserver", "max_connections draining", "on_start_timeout", "audio idle watchdog", "stale call reaper", "replay guard"]
+icon: "server"
+---
+
+`CallServer` answers the socket StandIn dials, authenticates it, speaks the wire protocol, and hands each call to a handler your plugin supplies. Everything it owns is the same whichever agent framework is on the other side, which is exactly why it lives in the SDK and not in the plugins.
+
+```python
+from standin import CallServer
+
+server = CallServer(handler_factory=MyHandler)
+await server.start()
+...
+await server.aclose()
+```
+
+## What it owns
+
+- the HMAC handshake, its freshness window and its single-use replay guard
+- capacity, draining, and the one-live-session-per-`callId` rule
+- the frame loop: inbound `session.start`, `audio.frame`, `video.frame`, `ping`, `participants`, `dtmf`, `recording.status`, `assistant.say` and `session.end`, and outbound `audio.frame`, `assistant.cancel`, `expression`, `speech.marks`, `display.image`, `display.frame`, `pong` and `session.end`
+- outbound sequence numbers and the audio timeline, for the tile as well as the voice
+- five timers: the pre-start watchdog, the caller-audio idle watchdog, the `on_start` timeout, the stale-call reaper and the optional call-duration ceiling
+- backpressure on outbound audio, so a peer that stops reading cannot wedge the call
+- `GET /healthz`, the per-call upgrade route, and the outcome route when you ask for one
+- idempotent, shielded teardown that always frees the slot
+
+A frame type the SDK does not recognise is ignored by contract, so an older plugin and a newer StandIn interoperate. That rule is about unknown frames. The avatar and display messages are not among them: they are messages this server builds and sends, and `video.frame` is parsed and stored on the way in.
+
+The server keeps the latest video frame per source whether or not your handler implements `on_video_frame`, because a plugin that only looks when the model asks implements no callback at all.
+
+## Constructor
+
+```python
+CallServer(
+    *,
+    handler_factory: HandlerFactory,
+    secret: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    ws_path: str | None = None,
+    max_connections: int = 64,
+    pre_start_timeout: float = 10.0,
+    audio_idle_timeout: float = 45.0,
+    on_start_timeout: float = 15.0,
+    max_call_seconds: float = 0.0,
+    stale_call_reaper_seconds: float = 120.0,
+    goodbye_text: str = "We are out of time on this call, so I have to stop here. Goodbye.",
+    goodbye_grace: float = 6.0,
+    on_call_outcome: Callable[[str, str], Any] | None = None,
+)
+```
+
+All arguments are keyword-only. Every timer is in **seconds**; the TypeScript twin spells the same options in milliseconds.
+
+| Option | Default | Environment fallback |
+|---|---|---|
+| `handler_factory` | *(required)* | none |
+| `secret` | *(required)* | `STANDIN_SECRET` |
+| `host` | `0.0.0.0` | `STANDIN_HOST` |
+| `port` | `9442` | `STANDIN_PORT` |
+| `ws_path` | `/msteams/calling` | `STANDIN_WS_PATH` |
+| `max_connections` | `64` | none |
+| `pre_start_timeout` | `10.0` | none |
+| `audio_idle_timeout` | `45.0` | none |
+| `on_start_timeout` | `15.0` | none |
+| `max_call_seconds` | `0.0`, off | none |
+| `stale_call_reaper_seconds` | `120.0`, **on** | none |
+| `goodbye_text` | `"We are out of time on this call, so I have to stop here. Goodbye."` | none |
+| `goodbye_grace` | `6.0` | none |
+| `on_call_outcome` | `None` | none |
+
+### handler_factory
+
+Builds one handler per call, called with no arguments. This is the plugin. A non-callable raises `StandInError` at construction, not at the first call, because a caller is already on the line by then.
+
+```python
+def build_handler() -> MyHandler:
+    return MyHandler(api_key=API_KEY)  # closes over its own configuration
+
+
+server = CallServer(handler_factory=build_handler)
+```
+
+### secret
+
+The connection secret from the StandIn portal. It must byte-match, or the handshake is rejected with 401. Falls back to `STANDIN_SECRET`, and an empty secret raises `StandInError` rather than starting a listener that would accept nothing.
+
+### host, port, ws_path
+
+Where the listener binds. The defaults match the StandIn plugin layout, `0.0.0.0:9442` at `/msteams/calling`, because the worker usually runs in a container behind an ingress. Bind `127.0.0.1` when only a local tunnel should reach the listener. The upgrade is HMAC-authenticated either way.
+
+`ws_path` is normalized to a single leading slash with no trailing slash. A path that reduces to `/` raises `StandInError`: the route has to have a real path, because the per-call `callId` is appended to it as `{ws_path}/{callId}`.
+
+The server also serves `GET /healthz`, which returns `{"ok": true, "calls": <n>}`.
+
+### max_connections
+
+Concurrent live calls. Checked **before any crypto runs**, so a flood cannot make the worker spend CPU verifying signatures for calls it was never going to accept. Over the limit, the upgrade gets `503 at capacity`.
+
+### pre_start_timeout
+
+Seconds a socket may stay silent after authenticating before it is dropped for never sending `session.start`.
+
+This defends against a slot leak: a socket that authenticates and then says nothing holds a connection slot and a `callId` that nothing will ever free, so every retry for that call would get `409` forever. The close reason is `pre-start-timeout`.
+
+It bounds the arrival of `session.start` only. Once that frame is received, `on_start_timeout` owns the startup budget.
+
+### audio_idle_timeout
+
+Seconds without caller audio before a live call is declared dead and torn down. `0` disables it.
+
+A live Microsoft Teams call delivers PCM continuously, and silence is still frames, so audio going quiet for this long means the call is gone on the far side and nobody said so. That happens: the peer keeps the socket open, and can even keep pinging, while its own teardown is wedged. Without this backstop the handler's session burns until someone notices. The close reason is `caller-idle-timeout`.
+
+The watchdog is armed **before** `on_start` runs, not after, so a hung `on_start` is covered by it too.
+
+An outbound call that nobody has picked up yet is skipped, because a ringing call carries no caller audio by definition and would otherwise look exactly like a dead one.
+
+### on_start_timeout
+
+Seconds a handler's `on_start` may take before the call is given up. `0` disables it.
+
+`on_start` does real network work: LiveKit joins a room and dispatches an agent, a realtime plugin opens a provider socket. The frame loop is suspended while it runs, so `session.end` is not even read, and an unbounded `on_start` holds a slot for the life of the worker. Exceeding it closes the call as `handler-start-timeout`; raising inside it closes as `handler-start-failure`.
+
+Those two reasons are distinct from `transport-failure` on purpose. Reporting a plugin's problem as StandIn's own socket failing sends both sides debugging the wrong system.
+
+## The stale-call reaper
+
+`stale_call_reaper_seconds` is 120 seconds a call may run with nothing having answered it. Set `0` to disable it. Four of the five bounds on this page are on by default; `max_call_seconds` is the one that is not.
+
+It covers the gap none of the other timers do. `pre_start_timeout` was watching for a `session.start` that arrived. `on_start_timeout` bounded an `on_start` that succeeded. `audio_idle_timeout` is satisfied, because the caller is still talking. So StandIn is on the call, the caller hears nothing, and no other timer will ever fire. An agent dispatch that never lands looks exactly like this, and it is the commonest misconfiguration there is.
+
+The close reason is `no-agent-answered`. The clock starts when the socket connects, and the check is coarse on purpose: this is a grace period, not something anybody measures to the second.
+
+**Sending audio counts as answering**, so most plugins are covered without doing anything. A plugin that answers by a route this server cannot see, joining a room and letting an agent speak there, calls [`session.mark_answered()`](/python-sdk/call-handler#callsession) when the agent's own audio track appears. Documenting the reaper without that method would be describing a timer with no way to satisfy it.
+
+<Warning>
+Call `mark_answered()` when the **agent's** track appears, not when a participant connects. Monitors, recorders and avatar workers all connect, and none of them is an agent answering.
+</Warning>
+
+## The call-duration ceiling
+
+`max_call_seconds` is a hard ceiling on one call, measured from `session.start`. It is off by default, because a ceiling is a policy rather than a safety net.
+
+It is different from `audio_idle_timeout`, and the difference is the whole point. That watchdog ends a call that went **quiet**. This one ends a call that has not: a caller who will not hang up, a model looping at itself, an automated system that dialled and never stopped talking. Each of those bills a provider by the minute for as long as the socket lives, and none of them trips a silence check.
+
+When the ceiling is reached the server flushes playback first, then hands `goodbye_text` to your handler's `on_goodbye`, the same callback StandIn's own closing line uses, so a plugin needs no new code to honour it. `goodbye_grace` bounds how long that line gets: after it the call ends whether or not anything was said, because a plugin that hangs in `on_goodbye` must not turn a time-limited call into an endless one. The close reason is `call-duration-limit`, and it arrives **after** `on_goodbye` has already fired.
+
+```python
+server = CallServer(
+    handler_factory=MyHandler,
+    max_call_seconds=15 * 60,
+    goodbye_text="We are at the end of our time, so I will stop here. Goodbye.",
+)
+```
+
+The flush has to come first, or the goodbye queues behind however many seconds of agent audio the service still holds and the call ends before anyone hears it.
+
+## Outbound call outcomes
+
+`on_call_outcome` is called with `(call_id, outcome)` when StandIn reports how an outbound call ended without anyone answering. It is the only signal that nobody picked up, and without it an unanswered call waits out the ring timer before anything can be said about it.
+
+```python
+server = CallServer(handler_factory=MyHandler, on_call_outcome=lane.on_outcome)
+```
+
+Passing it is what **creates the route**: `POST {ws_path}/outcome/{callId}`. Leave it unset and a POST there is a 404, so a worker that never places a call opens no extra surface.
+
+The route sits under `ws_path`, so the `/msteams/calling` mount you already have covers it and there is no second tunnel command to run. See [Expose your agent](/expose#mount-the-call-path).
+
+Four things about the verification are worth knowing:
+
+- It is signed with `X-StandIn-Signature-V2` over the method, the path and a hash of the body, so a signature captured for one route is useless against another.
+- The body is read **before** the signature can be checked, because the signature covers a hash of it. That is why the body is capped at 8 KB first: the cap is the bound on what an unauthenticated peer can make the worker read.
+- Freshness is checked in the 60-second handshake window, not the longer body window.
+- Over the cap is `413`, a bad signature or a stale timestamp is `401`, and a good one is `204`. A plugin that raises inside the callback is logged and the request is still acknowledged, because a failing outcome handler must not turn into a retry loop.
+
+Your `OutboundLane` reads this to sweep an unanswered call. See [Reaching people](/python-sdk/reaching-people).
+
+## Backpressure
+
+Outbound audio is **shed, not queued**. When the transport has more than `MAX_AUDIO_BUFFER_BYTES` (1 MB) unflushed, `send_audio` advances the sequence number and the timeline and returns without sending, and logs at most once every five seconds.
+
+```python
+from standin import MAX_AUDIO_BUFFER_BYTES  # 1048576
+```
+
+Two decisions in that sentence are load-bearing:
+
+**The timeline advances anyway.** It is the caller's clock. A dropped frame is a gap in what they hear, not a rewind, and stalling the clock would make every later frame claim a time that has already passed.
+
+**Audio only.** Control frames are never shed, because control frames are what end a call, and a call that cannot be ended is the failure this exists to prevent.
+
+A slow or wedged peer otherwise turns "await every send" into an unbounded queue, and those awaits are what stall the provider receive loop feeding them. Shedding keeps the loop moving: the caller hears a gap rather than the call wedging. Watch [`session.buffered_bytes`](/python-sdk/call-handler#callsession) before pushing a continuous stream. The avatar tile has its own, tighter budget, because a caller forgives a dropped frame far more readily than a break in the voice: see [The avatar](/python-sdk/avatar).
+
+## Properties
+
+| Property | Meaning |
+|---|---|
+| `server.ws_path` | The normalized path the listener answers on. |
+| `server.active_calls` | Live calls right now. |
+| `server.running` | Whether the listener is actually bound. A host that wires its own connect and disconnect needs this to tell a live listener from a dead one, rather than reporting a worker as connected because something once called `start()`. |
+| `server.host` | The interface the listener is bound to, or will be. |
+| `server.port` | The port actually bound, or the configured one before `start()`. Ask for it after starting on port `0`, which is how an ephemeral listener avoids racing another process for a port picked in advance. |
+| `server.draining` | Set `True` to refuse new calls while live ones continue. |
+| `server.audio_idle_timeout` | Readable and writable after construction. |
+| `server.on_start_timeout` | Readable and writable after construction. |
+| `server.max_call_seconds` | Readable and writable after construction. |
+| `server.goodbye_text` | Readable and writable after construction. |
+| `server.goodbye_grace` | Readable and writable after construction. |
+| `server.stale_call_reaper_seconds` | Read after construction, and applied when `start()` arms the reaper. |
+
+## Logging
+
+The SDK logs through the standard library, on the logger named `standin`. There is no `set_logger` function to call: routing it is whatever your deployment already does with `logging`.
+
+```python
+import logging
+
+logging.getLogger("standin").setLevel(logging.DEBUG)
+```
+
+<Note>
+The TypeScript SDK has no stdlib logging tree to hang this on, so it exports a `setLogger` function instead. That difference is the only one between the two SDKs here.
+</Note>
+
+Every call id that reaches a log line is rendered log-safe first: control characters are replaced and the length is bounded, so an id chosen by somebody else cannot forge a log line of its own.
+
+## Limits
+
+- One inbound message is bounded at **2 MB**. Audio is about 856 bytes of base64 per frame, and the protocol caps a `video.frame` JPEG to fit inside the same envelope.
+- Outbound audio is bounded by the 1 MB shed threshold above.
+- An outcome POST body is bounded at 8 KB.
+- A frame type this SDK does not recognise is ignored rather than refused.
+
+## start and aclose
+
+`await server.start()` binds the listener and is transactional: either it is listening when the call returns, or nothing of it survives. A failed bind cleans up its own runner before re-raising. Starting twice raises `StandInError` rather than quietly binding a second listener.
+
+`await server.aclose()` stops the reaper, **ends** every live call with the reason `server-shutdown`, and then stops listening. It does not wait for a call to finish on its own, which is why a graceful restart is `draining` first and `aclose()` after. It awaits the calls' real teardown tasks, so the loop cannot stop with teardown still pending.
+
+```python
+import asyncio
+
+from standin import CallServer
+
+
+async def serve() -> None:
+    server = CallServer(handler_factory=MyHandler)
+    await server.start()
+    try:
+        await asyncio.Event().wait()  # run until cancelled
+    finally:
+        await server.aclose()
+```
+
+## Draining
+
+`server.draining = True` refuses new calls. Live calls continue. New dials are refused with `503 draining`, so a worker that is winding down does not accept calls it will never serve. Set it as the first step of your shutdown, wait for `server.active_calls` to reach zero, then `aclose()`.
+
+```python
+async def shutdown(server: CallServer) -> None:
+    server.draining = True                  # new dials get 503; live calls continue
+    while server.active_calls > 0:
+        await asyncio.sleep(1)
+    await server.aclose()
+```
+
+The LiveKit plugin wires this up for you: it sets `draining` when the LiveKit worker itself starts draining, and closes the listener when the worker shuts down.
+
+## What the upgrade handler refuses, in order
+
+The order matters, because each check is cheaper than the one after it.
+
+| Response | Condition |
+|---|---|
+| `400 missing callId` | The dialed path had no `callId` segment. |
+| `503 draining` | The worker is winding down. |
+| `503 at capacity` | `max_connections` live calls already. Checked before any signature work. |
+| `401 unauthorized` | Missing, malformed, stale or wrong signature. |
+| `401 handshake already used` | A valid signature replayed inside the freshness window. |
+| `409 call already has a live session` | That `callId` already has an open socket. |
+
+See [Security](/python-sdk/security) for how the signature and the replay guard work.
+
+## Teardown
+
+Teardown runs once per call, in its own task, and it is shielded: a caller being cancelled must never abort it mid-flight, because that is how a slot leaks and a `callId` starts refusing forever. The order is fixed.
+
+1. Cancel the call's own background tasks and wait for them.
+2. If `on_start` is still on the stack, wait briefly for it to unwind. Dispatching `aclose` underneath a running `on_start` would tear down half-built state, and `on_start` would then resume and finish building a provider session nothing will ever close.
+3. Dispatch the handler's `aclose(reason)`, before the socket closes, so a handler that wants to speak on the way out still can.
+4. Write the advisory `session.end`, then close the socket with a two-second bound. Releasing the slot matters more than a clean close handshake with a peer that has already gone away.
+5. Release the slot, unconditionally, whatever failed above.
+
+The first close reason wins. A cascade of close causes must not overwrite the one that actually ended the call. [Call handler](/python-sdk/call-handler#aclose) lists the reasons a handler will see.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call handler" icon="code" href="/python-sdk/call-handler">
+    The five methods this server drives, and the session it hands them.
+  </Card>
+  <Card title="Security" icon="shield" href="/python-sdk/security">
+    The handshake, the replay window, and the two signing lanes.
+  </Card>
+</CardGroup>

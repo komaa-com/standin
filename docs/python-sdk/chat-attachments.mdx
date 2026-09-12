@@ -1,0 +1,221 @@
+---
+title: "Attachments in chat"
+description: "Turning a pasted screenshot, a dragged-in file or a voice note into one ChatTurn your agent can answer, in the StandIn Python SDK."
+keywords: ["Microsoft Teams attachment AI agent", "build_chat_turn ChatTurn", "chat image vision model", "voice message transcription", "attachment origin pin"]
+icon: "paperclip"
+---
+
+A Microsoft Teams message can carry a pasted screenshot, a file dragged in from disk, or a voice note. Without any of this, your handler gets `InboundMessage.attachments` as raw dictionaries, so the best it can do is read a JSON blob to a model and the worst is answer a message about a picture as though nothing had been sent.
+
+## One call does the whole message
+
+```python
+from standin import build_chat_turn
+
+turn = await build_chat_turn(message, transcribe=my_stt)
+answer = await agent.ask(turn.query, images=[image.data_url for image in turn.images])
+```
+
+`build_chat_turn` takes the `InboundMessage` your [chat handler](/python-sdk/chat) was given and returns a `ChatTurn`: the text to ask, the pictures to hand over, and a plain sentence naming anything that came with the message.
+
+| Field | Type | What it is |
+|---|---|---|
+| `query` | `str` | The text to put in front of the model, including every note below. |
+| `images` | `list[ChatImage]` | Pictures that were fetched and are ready for a vision model. |
+| `voice_note` | `str` | What the voice notes said, or empty. |
+| `attachment_note` | `str` | The "what was attached" sentence, on its own. |
+
+```python
+turn = await build_chat_turn(
+    message,
+    origin=None,        # None means derive it; see the origin pin below
+    images=True,        # False to skip image fetching entirely
+    transcribe=None,    # your speech-to-text callable, or no transcription
+)
+```
+
+`images=False` and no `transcribe` make it a pure text assembler that opens no sockets at all. A handler that fetches nothing pays nothing. There is a fourth keyword, `get`, which substitutes the opener every request goes through: it exists so a test can reach every edge of this page without a socket.
+
+<Note>
+  This lives in `standin.attachments`, deliberately **not** in `standin.chat`. That module owns the socket, the duplicate check and the per-conversation ordering, and none of that changes here. Fetching is optional work that must never be able to wedge the transport, so it sits beside it rather than inside it. Every function and class on this page is re-exported at the package root, so `from standin import ...` reaches it. The caps are not, and each one below spells the module import it needs.
+</Note>
+
+## The order is the order a person would say it in
+
+`query` is assembled in a fixed order, and the order is not arbitrary: it is the order somebody would have said the same thing out loud.
+
+1. **What they typed.** `message.text`, stripped.
+2. **What they pressed.** The submit payload of an `Action.Submit` on a card this agent sent, as `card_action_note`. A card message arrives with **empty text**, so without this the agent is asked nothing at all and answers as though the person said nothing. The payload is serialized and truncated at 4096 characters, which bounds this agent's own card template rather than a stranger's message.
+3. **What they said out loud.** The transcribed voice notes, under `[They sent a voice message]`.
+4. **What they attached.** The note from `attachments_note`, under `[Attached to this message]`.
+
+Each part is omitted when it is empty, and the parts are joined by blank lines. A message with nothing attached produces a `query` that is exactly the text the person typed.
+
+## It never raises
+
+`build_chat_turn` does not raise. Anything that will not load is **named in the note** instead of failing the turn, because a failed picture is not a reason to leave a question unanswered.
+
+The note distinguishes the two outcomes per attachment:
+
+```text
+[Attached to this message]
+- plan.png [image] (attached)
+- q3.xlsx [file] (unreadable)
+```
+
+That distinction is the point of the note. A model told a picture was attached and could not be opened says something useful. A model told nothing answers as if the message were empty. And a model told a picture was attached, when nothing was actually fetched, answers **about a picture it has never seen**, which is the worst of the three.
+
+The note is bounded at ten entries followed by a count of the rest, so a message with forty attachments does not become the whole prompt. `attachments_note(attachments, status=...)` is callable on its own, where `status` maps an attachment's index in the message to the word in its brackets. Neither that ten nor the 4096 above is part of the module's exported surface, where the TypeScript twin names both at its root as `ATTACHMENT_NOTE_MAX_LINES` and `CARD_PAYLOAD_MAX_CHARS`. Read them here rather than importing them.
+
+## Images
+
+```python
+from standin import ChatImage
+```
+
+| Field | Type | What it is |
+|---|---|---|
+| `data_base64` | `str` | The image as it arrived, base64. |
+| `mime` | `str` | The real media type. The response's own header wins; see below. |
+| `name` | `str \| None` | The filename, when there was one. |
+| `size_bytes` | `int` | How big it was. |
+| `data` | `bytes` | Property. The decoded bytes, for an API that uploads a file. |
+| `data_url` | `str` | Property. The `data:` form most vision APIs take directly. |
+
+<Note>
+  `data` and `data_url` are **properties** here. `ChatImage` is an interface in the TypeScript SDK, and an interface carries no accessors, so the same two conveniences are the free functions `chatImageData` and `chatImageDataUrl` there. A search for `.dataUrl` across that SDK finds nothing.
+</Note>
+
+`fetch_chat_images(attachments, origin=...)` is the piece underneath, for a handler that wants the pictures without the rest of the turn. It is best-effort per attachment: one that will not load costs that attachment, never the answer. Every cap below is also a keyword argument on it, as `max_bytes`, `max_images` and `timeout_s`, so a handler that wants a tighter number passes one rather than reaching for the constant.
+
+The caps are not at the package root. Spell the module:
+
+```python
+from standin.attachments import (
+    IMAGE_FETCH_ATTEMPTS,   # 8
+    IMAGE_FETCH_TIMEOUT_S,  # 10.0
+    MAX_IMAGES,             # 4
+    MAX_IMAGE_BYTES,        # 4 MiB
+)
+```
+
+`MAX_IMAGES` is the **accept** cap: four pictures are kept from one message, because each becomes a base64 blob in front of a model. `MAX_IMAGE_BYTES` is what one of them may weigh, and it matches the per-attachment ceiling StandIn applies anyway, so a larger local number could never be reached. `IMAGE_FETCH_TIMEOUT_S` is how long one image has to arrive, **in seconds**. The TypeScript twin counts the same budget in milliseconds under a different name, `IMAGE_FETCH_TIMEOUT_MS`, so a number carried across unchanged is off by a factor of a thousand.
+
+<Warning>
+  `IMAGE_FETCH_ATTEMPTS` is a **separate** cap, and it is the one that keeps the worst case arithmetic. The accept cap counts only successes, so without it a message naming fifty attachments that all time out still costs fifty timeouts and blows the whole turn budget while nothing is ever accepted. The attempt cap counts requests whatever the outcome: eight tries at ten seconds, and that is the ceiling.
+</Warning>
+
+Two more things the fetch does, both about what arrives rather than what was claimed. The media type is judged **before a byte is read**, and the response's own header wins, because an error page would otherwise be base64'd in front of a model as though it were a picture. What the message declared is the fallback, and only when it is itself a media type: a dragged-in file declares a bare extension, and taking that literally would fail every `audio/` check and spool the bytes under a nonsense name. And the size cap holds **while** the body is read rather than after it, because a `content-length` that lies, or is simply absent, otherwise gets to allocate whatever it likes before a later check objects.
+
+<Note>
+  This `MAX_IMAGE_BYTES` is not the only one in the SDK, and the two are different numbers for different things. The one here, in `standin.attachments`, is how big an **inbound** attachment may be before this worker refuses to read it. There is a second `MAX_IMAGE_BYTES` in `standin.vision`, and that one is the **outbound** cap on an image you put on the bot's video tile: a smaller number, on a different direction of travel. Neither is re-exported at the package root, so the module you import from is what says which you meant.
+
+  The two SDKs differ here, and in the direction that matters for porting. The TypeScript SDK **does** export `MAX_IMAGE_BYTES` from its root, and the one it exports is the outbound number: passing it where an inbound cap belongs compiles cleanly and quietly caps attachments at the smaller value. Python has no such collision to fall into, because neither name is at the root to be picked up by accident. See [Vision](/python-sdk/vision#fetching-an-image-a-model-chose).
+</Note>
+
+## A dragged-in picture is a file, not an image
+
+A pasted screenshot arrives with `kind` of `image`. The **same file** dragged in from disk arrives with `kind` of `file` and a `contentType` that is a bare extension like `png` rather than a media type.
+
+So gating on the declared kind alone is the trap here, and it is a quiet one: the picture is never fetched, but the note still says one was attached, and the model answers about a picture nobody gave it.
+
+An attachment is therefore worth a request when its kind matches **or** when its kind is exactly `file` and its filename's extension, or a declared type that is itself a bare extension, is one of `png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`, `heic`, `heif`. The widening is `file` only: it exists to rescue the dragged-in case, not to override a kind the message stated outright. What the file then turns out to be is decided by the response, not by the extension that got it tried.
+
+An attachment StandIn marked as not relayable is skipped without a request.
+
+## Voice notes
+
+```python
+from standin import ChatAudio, Transcriber
+```
+
+`ChatAudio` is one clip before anything has transcribed it: `data` as bytes, `mime`, and `name`. `fetch_chat_audio` returns them. `video/` types are accepted as well as `audio/`, because some clients label a voice note with a container type that speech-to-text reads perfectly well, and the same extension widening applies: a voice note relays as a file in practice, so a plugin gating on `kind == "audio"` transcribes nothing, ever.
+
+`Transcriber` is the callable **you** supply:
+
+```python
+Transcriber = Callable[[bytes, str], Awaitable[str]]   # (data, mime) -> text
+```
+
+The core ships none and reads no provider key. Deciding which speech vendor somebody's voice is sent to is not a decision an SDK gets to make on their behalf, and a default would make it silently.
+
+```python
+from standin import transcribe_voice_messages
+
+said = await transcribe_voice_messages(attachments, transcribe=my_stt, origin=origin)
+```
+
+It returns the clips as one block of text, and empty when there are none, when no transcriber was supplied, or when every one failed. With no transcriber it fetches nothing at all rather than downloading audio that has nowhere to go. A transcriber that raises costs that clip and nothing else.
+
+The clip budgets are deliberately larger than the image ones:
+
+```python
+from standin.attachments import (
+    CLIP_FETCH_ATTEMPTS,   # 4
+    CLIP_FETCH_TIMEOUT_S,  # 20.0
+    MAX_CLIPS,             # 2
+    MAX_CLIP_BYTES,        # 16 MiB
+)
+```
+
+A voice note is minutes of audio where a picture is one screen, so it needs four times the bytes and twice the wall clock to arrive. The attempt cap is halved to pay for that: four tries at twenty seconds is the same eighty second worst case as eight tries at ten. And two clips rather than four, because each accepted clip is a transcription call on top of the download.
+
+## An engine that only takes a path
+
+Plenty of transcription engines will not take bytes. `spool_clip` is a context manager that writes the clip to a temporary file, named with the extension its media type implies, and hands you the path:
+
+```python
+from standin import ChatAudio, spool_clip
+
+
+async def my_stt(data: bytes, mime: str) -> str:
+    with spool_clip(ChatAudio(data=data, mime=mime)) as path:
+        return await engine.transcribe_file(path)
+```
+
+The file is removed **on the way out, on every path**, including the one where the engine raised. That is not tidiness. A transcription engine is being handed somebody's voice, and a clip left behind in a temporary directory is a copy nobody decided to keep, sitting on disk long after the conversation it came from ended.
+
+Pass `directory` to spool somewhere other than the system temporary directory, when an engine needs the file on a particular volume.
+
+<Note>
+  Both differences from the TypeScript twin are here. This one is a context manager, which is the shape Python has for "hold this open for exactly this long", while that one takes a callback. And this one takes `directory`: there is no such argument there, so that SDK always spools into the system temporary directory.
+</Note>
+
+## The origin pin
+
+Every fetch on this page is pinned to the one origin the messages themselves arrived from:
+
+```python
+from standin import attachment_origin
+
+attachment_origin()                                    # from STANDIN_CHAT_URL, else the default
+attachment_origin("wss://example.com/api/chat/channel")  # "https://example.com"
+attachment_origin("ws://127.0.0.1:9444/x")               # "http://127.0.0.1:9444"
+```
+
+It is derived from the chat channel's own URL rather than configured separately, so it is right by construction for a self-hosted or local setup and there is no second setting to get wrong. `ws` maps to `http` and `wss` to `https`, and a default port is not spelled out, so `wss://host:443` and `wss://host` compare equal.
+
+<Note>
+  The name is `attachment_origin` here and `chatAttachmentOrigin` in the TypeScript SDK. That is the one name on this page that is not a straight casing translation of its twin, so a search for `attachment_origin` across that SDK finds nothing.
+</Note>
+
+<Warning>
+  It **fails closed**. A URL it cannot resolve, and anything that is not `http`, `https`, `ws` or `wss`, returns `None`, and `None` means fetch nothing at all.
+
+  That direction is the whole design. An attachment URL is signed, but not by you and not for you: it arrives inside a message somebody else wrote, and the pin is the only thing bounding where this worker can be told to go. An unset origin read as "anywhere" would turn a configuration typo into a fetcher that a stranger's message can point at any address it likes, an internal service or a cloud metadata endpoint included.
+</Warning>
+
+Two consequences worth knowing. An attachment whose URL is not on that origin is refused **without a request**, so the log line is the only cost. And no redirect is followed: the URL is same-origin and signed, so a redirect off it is already anomalous, and following one would reopen the door the pin just closed, since the pin is checked on the URL in the message and not on wherever a `302` points.
+
+Pass `origin=` explicitly when your handler already knows it. Otherwise `build_chat_turn` derives it for you.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Chat" icon="comments" href="/python-sdk/chat">
+    The channel these messages arrive on, and what goes back out.
+  </Card>
+  <Card title="Security" icon="shield" href="/python-sdk/security">
+    The two signing lanes, and what the SDK refuses.
+  </Card>
+</CardGroup>

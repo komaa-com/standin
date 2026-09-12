@@ -1,0 +1,317 @@
+---
+title: "Call handler"
+description: "The seven optional methods a StandIn TypeScript plugin implements, and the CallSession it is handed."
+keywords: ["CallHandler", "CallSession", "cancelPlayback", "barge-in", "markAnswered", "Microsoft Teams voice agent"]
+icon: "plug"
+---
+
+A handler is a plain object with up to seven optional methods. One instance is built per call by your
+`handlerFactory`. There is no base class, no registration, and no method you are obliged to write:
+the server treats a missing one as a no-op, so a handler that only wants audio implements only
+`onCallerAudio`.
+
+```ts
+import { CallServer, type CallSession } from "@komaa/standin-sdk";
+
+class MyHandler {
+  #call: CallSession | undefined;
+
+  async onStart(session: CallSession) { this.#call = session; }
+  async onCallerAudio(pcm: Buffer) { await this.#call?.sendAudio(pcm); }
+  async onContext(text: string) {}
+  async onGoodbye(text: string) {}
+  async aclose(reason: string) {}
+}
+
+const server = new CallServer({ handlerFactory: () => new MyHandler() });
+await server.start();
+```
+
+## The seven methods
+
+`onStart`, `onCallerAudio`, `onVideoFrame`, `onSpeakerChange`, `onContext`, `onGoodbye` and `aclose`.
+In Python they are the same methods in snake_case: `on_start`, `on_caller_audio`, `on_video_frame`,
+`on_speaker_change`, `on_context`, `on_goodbye`, `aclose`. Porting a handler between the languages
+changes the names and nothing else.
+
+<Note>
+One real difference, and it only matters if you are porting: all seven are optional members of one
+`CallHandler` interface here, while Python keeps `on_video_frame` and `on_speaker_change` on separate
+`VideoHandler` and `SpeakerHandler` protocols. Python's `CallHandler` is `runtime_checkable`, and a
+runtime check demands every member, so adding a sixth would have broken `isinstance` for every
+handler written before the vision lane existed. Nothing about the wire or the behaviour differs.
+</Note>
+
+### `onStart(session)`
+
+The call is live. Join a room, open a realtime socket, build an agent, whatever your framework needs.
+
+Caller audio does not flow until this resolves, so a slow start delays the caller rather than dropping
+frames. It is bounded by `onStartTimeoutMs`, 15 seconds by default, because `onStart` does real
+network work and the frame loop is queued behind it. An unbounded one would hold a call slot for the
+life of the worker.
+
+Caller audio and context that arrive while your provider is still connecting are **yours to hold**,
+not the server's. `StartupBuffer` is the piece that does it, and losing that window is the difference
+between an agent that opens by answering the question it was asked and one that opens by asking it
+again. See [Realtime providers](/typescript-sdk/realtime-providers#what-arrives-before-your-agent-is-ready).
+
+### `onCallerAudio(pcm)`
+
+One frame of the caller's voice: PCM16, 16 kHz, mono, little-endian, as a `Buffer`.
+
+This runs on the receive path of a live call, so it must not block. The frame is already validated:
+a truncated or malformed payload is dropped by the server and never reaches here.
+
+### `onVideoFrame(frame)`
+
+One sampled frame of the caller's camera or screen share.
+
+Frames arrive sparsely and best-effort, and most handlers never implement this: the common shape is
+to look only when the model asks, which `session.latestVideoFrame()` already serves without a
+callback. Implement it for ambient vision: narrating a slide deck, watching a whiteboard, noticing
+that the share stopped. It runs on the receive path too, so a slow model call belongs off the frame
+loop exactly as in `onCallerAudio`. See [Vision and the avatar](/typescript-sdk/vision).
+
+### `onSpeakerChange(name)`
+
+A different person started speaking, and only when StandIn sends unmixed audio. Most calls carry
+mixed audio and never call it at all.
+
+It is called on CHANGE only, never per frame: the name rides every inbound audio frame, and a model
+told forty times a second who is speaking would hear nothing else.
+
+### `onContext(text)`
+
+Non-interrupting context about the call, as a plain sentence ready to put in front of a model:
+participant counts and group-call etiquette, DTMF key presses, and recording status changes. For
+example, `The caller pressed the "5" key on their keypad.`
+
+Both SDKs publish the same sentences, so an agent written against either reads identical context.
+Context is delivered as it arrives, and the server does not queue it on your behalf, because what
+"ready" means is your framework's business. If your agent cannot accept context before it is built,
+queue it here.
+
+### `onGoodbye(text)`
+
+StandIn is ending the call and wants this line spoken first.
+
+The server has already told StandIn to drop whatever agent audio it had buffered, so the line plays
+immediately. Interrupt the current turn and say it. Teardown follows within seconds, and a goodbye
+queued behind a long answer is a goodbye the caller never hears.
+
+The same callback carries the line from a `maxCallMs` ceiling, which is why a plugin that honours
+`onGoodbye` needs no extra code for the duration limit.
+
+### `aclose(reason)`
+
+Release everything this call holds. Always called exactly once, on every path, before the slot is
+freed. It runs before the socket closes, so a handler that wants to say something on the way out
+still can.
+
+| Reason | What happened |
+|---|---|
+| `call-ended` | StandIn ended the call normally. |
+| `pre-start-timeout` | The socket authenticated and never sent `session.start`. |
+| `caller-idle-timeout` | No caller audio for `audioIdleTimeoutMs`. |
+| `handler-start-timeout` | `onStart` ran past `onStartTimeoutMs`. |
+| `handler-start-failure` | `onStart` threw. |
+| `handler-failure` | Some other handler method rejected. |
+| `transport-failure` | The frame loop failed. |
+| `server-shutdown` | `server.aclose()`. |
+| `no-agent-answered` | Nothing sent audio and nothing called `markAnswered()` inside `staleCallReaperMs`. |
+| `call-duration-limit` | The call hit `maxCallMs`. |
+| `agent-ended-call` | The model called the `end_call` tool. |
+| `outbound-no-answer` | An outbound leg rang out. See [Reaching people](/typescript-sdk/reaching-people). |
+
+Anything else is a string you passed to `session.end()`.
+
+`no-agent-answered` is the one a plugin author meets first and has nowhere else to look up: it means
+the call connected and authenticated perfectly and no agent ever arrived.
+
+## The session object
+
+`CallSession` is handed to `onStart` and is valid until the call ends. The server owns the socket;
+this is your only way to reach it. Seventeen members, and this is all of them.
+
+| Member | Purpose |
+|---|---|
+| `callId` | StandIn's id for this call. Authenticated: it is the value the handshake HMAC signed, not something a caller supplied. |
+| `start` | The `session.start` that opened the call: caller identity, direction, thread id, recording status. |
+| `await sendAudio(pcm)` | Send the agent's voice. Same PCM16 16 kHz mono format `onCallerAudio` receives. Resolving is not proof it went out: see below. |
+| `await cancelPlayback()` | Drop whatever agent audio StandIn still has buffered. |
+| `await end(reason)` | Ask for the call to end. Idempotent, and the first reason wins. |
+| `recordingActive` | Whether the call is being recorded, right now. |
+| `speaker` | Who is speaking, when StandIn sends unmixed audio. `undefined` on the mixed path. |
+| `participantCount` | How many people are on the call. Zero until StandIn says. |
+| `answered` | Whether anything has actually taken this call yet. |
+| `markAnswered()` | Say that an agent has taken it. Stamped once, never re-stamped. |
+| `bufferedBytes` | Outbound bytes the socket has not flushed yet. |
+| `mediaTimeMs` | The outbound audio timeline, in milliseconds. |
+| `latestVideoFrame(source?)` | The most recent frame the caller showed, or `undefined`. |
+| `await displayImage(image, options?)` | Draw an image on the bot's video tile for a few seconds. |
+| `await sendTileFrame(jpeg, width?, height?)` | Put one frame of continuous video on the tile. |
+| `await express(emotion)` | Hint the emotion the avatar's face should wear. |
+| `await sendSpeechMarks(marks)` | Send one utterance's viseme timeline, which drives lip-sync. |
+
+Five of those repay a paragraph each.
+
+**`sendAudio` can drop the frame you hand it.** Past 1 MB of unflushed socket buffer it advances the
+outbound timeline and returns **without sending**, so the promise resolving is not evidence the audio
+reached anyone. The caller hears a gap rather than the loop wedging, and the timeline still advances
+because a dropped frame is a gap in what they hear rather than a rewind. Control frames are never
+shed. [Audio](/typescript-sdk/audio#agent-audio-can-be-dropped) has the whole rule.
+
+**`markAnswered()` is what keeps a listening plugin alive.** A call counts as answered when the
+handler sends audio. A plugin that joins a room and only listens never sends any, so the
+[stale-call reaper](/typescript-sdk/call-server#the-watchdogs) ends it after two minutes with
+`no-agent-answered`. Call `markAnswered()` when your agent's own audio track appears, not when a
+participant connects: monitors, recorders and avatar workers all connect, and none of them is an
+agent answering.
+
+**`mediaTimeMs` is the clock, not the wall clock.** It is the same timeline this call's audio frames
+are stamped with, and it is what a video frame must be stamped with too. A wall clock keeps ticking
+through listening silence while this one does not, so stamping video from a wall clock makes audio
+and video drift apart on paper even when they are in step.
+
+**`bufferedBytes` is evidence, not proof.** It is the number a continuous sender watches before
+deciding to drop a frame rather than queue it. It reads zero when the transport cannot report it, so
+treat a zero as "no evidence of backpressure" rather than as an idle socket.
+
+**`recordingActive` is one flag the server keeps current**, so no plugin re-derives it from the
+context sentence it happened to see. A reported `recording.status` **wins over the `session.start`
+snapshot**, whichever arrives first: the snapshot omits the field when the state was unknown at answer
+time, and an omitted field is not "not recording".
+
+<Warning>
+Gate on `recordingActive` before anything that STORES what the caller said or showed with a third
+party. A recorded call is one the caller was told is being kept; an unrecorded one is not.
+</Warning>
+
+The last four rows are the vision and avatar lane. StandIn draws the tile; these send it what to
+draw and what face to wear. [Vision and the avatar](/typescript-sdk/vision) covers what the caller
+shows you, and [The avatar](/typescript-sdk/avatar) covers expressions, the viseme timeline and
+putting your own video on the tile.
+
+You never track a sequence number or a timestamp. The server owns both, which is why a handler that
+swaps or re-publishes its audio source cannot make the outbound timeline jump backwards while the
+sequence number keeps climbing.
+
+## `cancelPlayback()` is the barge-in
+
+<Warning>
+`cancelPlayback()` is the **only** wire-level lever that un-sends audio already handed to the service.
+Without it, a barge-in stops the model but the bot keeps talking for the length of the buffered PCM,
+which is the "it kept talking over me" complaint in its entirety.
+</Warning>
+
+Call it the moment your provider reports the caller started speaking, and call it **before** you
+cancel the response upstream. Cancelling upstream first stops new audio being generated but leaves
+everything already queued at the service to play out.
+
+```ts
+async onProviderSaysCallerStartedSpeaking() {
+  await this.#call?.cancelPlayback();   // first: flush what the service still holds
+  this.#provider.cancelResponse();      // then: stop the model generating more
+  this.#aligner.reset();                // and drop the residual of the interrupted turn
+}
+```
+
+The two natural trigger sites are the provider truncating its own turn because it heard the caller,
+and a deterministic verbal interrupt you match yourself. The second exists because the model is
+mid-generation when "stop" arrives, so matching the phrase in code is what makes the cut feel instant.
+`isVerbalInterrupt` is that matcher, on [Group calls](/typescript-sdk/group-calls#stop-means-stop).
+
+## Refusing a call
+
+`session.end()` is safe to call from inside `onStart`. It returns immediately there rather than
+deadlocking against teardown, and the close runs once `onStart` unwinds. Refusing a call is an
+ordinary thing to do, so it is one line:
+
+```ts
+import { isInboundCallAllowed, type CallSession } from "@komaa/standin-sdk";
+
+async onStart(session: CallSession) {
+  if (!isInboundCallAllowed(policy, allowFrom, session.start.caller.aadId)) {
+    await session.end("not-allowed");
+    return;
+  }
+  // ... build the agent
+}
+```
+
+Give the refusal a real reason string. It reaches StandIn as the close reason, so `busy`,
+`not-allowed` and `realtime-unavailable` are visible on the call instead of appearing as silence.
+
+The matcher and the reason it has an id branch as well as a phone branch are on
+[Security](/typescript-sdk/security#who-may-call-the-agent). It is TypeScript only: a Python worker
+writes the same test by hand.
+
+## Ordering and failure
+
+- **Nothing arrives before `onStart` resolves.** Inbound messages are handled serially, so audio
+  packed into the same TCP read as `session.start` still waits.
+- **Context can arrive before there is a handler** on a fast dial, and is dropped in that window.
+  There is nothing to receive it, and the server does not buffer on a plugin's behalf. The commoner
+  case is different and is yours: a handler that exists with a provider not connected yet, which is
+  what [`StartupBuffer`](/typescript-sdk/realtime-providers#what-arrives-before-your-agent-is-ready)
+  is for.
+- **A rejection from any method ends that call alone.** It is logged, the call closes with
+  `handler-failure`, and the worker keeps taking other calls. One bad call must never take the worker
+  with it.
+
+## What `session.start` carries
+
+```ts
+interface Caller {
+  readonly aadId?: string;
+  readonly displayName?: string;
+  readonly tenantId?: string;
+}
+
+interface SessionStart {
+  readonly callId: string;
+  readonly threadId: string;
+  readonly caller: Caller;
+  readonly direction: "inbound" | "outbound";
+  readonly recordingStatus?: string;
+  readonly tenantId?: string;
+}
+```
+
+Both types are exported, so `import { type Caller, type SessionStart } from "@komaa/standin-sdk"`
+resolves and you can name them in your own signatures rather than re-declaring the shape.
+
+Blank or absent values normalize to `undefined`, so treat every caller field as optional. A
+`direction` that is neither `inbound` nor `outbound` reads as `inbound` rather than being carried
+through as a third value every branch has to handle.
+
+<Warning>
+`caller.aadId` is empty for guest and anonymous callers, which means an anonymous caller can never
+match an allowlist. That is the intended behaviour, not a gap. Never use it as a bare key for
+per-caller memory without checking it first either, or every anonymous caller shares one identity.
+</Warning>
+
+The two `tenantId` fields are not the same tenant and the names invite the mistake. The top-level one
+is the call's, which is the tenant your worker is bound to. `caller.tenantId` describes the
+organisation a guest came from, and reaching for it when you meant the other is the one
+plausible-looking source that is actively wrong. See
+[Meeting recap](/typescript-sdk/minutes#where-the-minutes-go), where posting to the wrong one is the
+failure it prevents.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call server" icon="server" href="/typescript-sdk/call-server">
+    Options, watchdogs, capacity and draining.
+  </Card>
+  <Card title="Audio" icon="waveform" href="/typescript-sdk/audio">
+    Rates, frames, and the clipping trap.
+  </Card>
+  <Card title="Realtime providers" icon="bolt" href="/typescript-sdk/realtime-providers">
+    What arrives before you are ready, and why the agent answers itself.
+  </Card>
+  <Card title="Call tools" icon="wrench" href="/typescript-sdk/call-tools">
+    Let the model hang up, show a picture and look at the screen share.
+  </Card>
+</CardGroup>

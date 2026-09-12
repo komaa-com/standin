@@ -1,0 +1,322 @@
+---
+title: "The avatar"
+description: "Expressions, the viseme timeline that drives lip-sync, and putting your own video on the bot's tile, in the StandIn TypeScript SDK."
+keywords: ["avatar lip sync Microsoft Teams", "viseme speech marks", "ExpressionCue inferEmotion", "TurnLipSync estimateVisemes", "avatar tile video relay"]
+icon: "face-smile"
+---
+
+StandIn renders the avatar tile. Your worker does not draw it, stream it, or know how it is made. It sends hints, and the service does the rest.
+
+## Two hints and one stream
+
+There are two hints. One names the emotion the face should wear, the other carries the viseme timeline for an utterance, which is what makes the mouth match the words:
+
+```ts
+await session.express("happy");
+await session.sendSpeechMarks([
+  { tMs: 0, visemeId: 12 },
+  { tMs: 200, visemeId: 4 },
+  { tMs: 400, visemeId: 14 },
+  { tMs: 800, visemeId: 8 },
+]);
+```
+
+Everything here is **additive and best-effort**. An unknown emotion renders as neutral, a service that does not implement one of these ignores it, and nothing on this page changes a single sample of the audio the caller hears. That is the whole reason it is safe to send: the worst case is a neutral face over an unchanged voice, which is exactly what the caller would have got had you sent nothing at all.
+
+Neither hint needs a provider that offers it. The emotion can be read straight out of the reply text with no extra model call, and the timeline can be built for a provider that returns no timings whatsoever. Those two are the bulk of this page.
+
+Then there is the stream, for the minority of workers that already produce video of their own: `TileStream` puts that on the tile in place of the rendered avatar. It is the one thing here that is continuous rather than a hint, and the last section is mostly about not letting it hurt the voice.
+
+## The emotion the face wears
+
+```ts
+import { EMOTIONS, expression } from "@komaa/standin-sdk";
+
+EMOTIONS; // ["neutral", "happy", "sad", "surprised", "thinking"]
+```
+
+`EMOTIONS` is an **open set**, not a validation list, and the `Emotion` type says so in the types: it is one of those five, or any other string. Sending something outside the set is allowed and renders as neutral, which is what lets a newer sender and an older service keep interoperating instead of one of them refusing the other's vocabulary.
+
+`session.express(emotion)` is what a handler calls. `expression(emotion)` is the message builder underneath it, exported for a plugin that assembles its own wire messages.
+
+```ts
+import { MAX_EMOTION_CHARS } from "@komaa/standin-sdk";
+
+MAX_EMOTION_CHARS; // 40
+```
+
+`expression()` throws on an empty emotion or one longer than `MAX_EMOTION_CHARS`. Everything in between is the service's to interpret.
+
+The cap is applied **where the message is built**, not at the edge of some plugin, and that placement is the point. An emotion reaches the avatar tile, and the string usually came from a model that whoever is on the call is steering: a tool argument, a token off a transcript. Bounding it at the builder means `session.express` is bounded, every plugin's own `express` tool is bounded, and no future one can forget to do it.
+
+## Emotion with no extra model call
+
+An extra inference per sentence is not something a live call can pay for. `inferEmotion` reads the emotion out of the reply text instead, with no model call and no added latency:
+
+```ts
+import { inferEmotion } from "@komaa/standin-sdk";
+
+inferEmotion("Congratulations, that is excellent"); // "happy"
+inferEmotion("Sorry, that is great news"); // "sad"
+inferEmotion("They did what??"); // "surprised"
+inferEmotion("the meeting is at four"); // "neutral"
+```
+
+It returns `surprised`, `sad`, `happy` or `neutral`, typed as `InferredEmotion` and ready to hand to `expression()`. First match wins in that order rather than a score being totalled: a startled "wow" must not be averaged away by a polite "thanks", and an apology must not be masked by an incidental "nice".
+
+`ExpressionCue` decides **when** one is worth sending, which is the harder half. Ask it on every assistant transcript, partial and final alike, and send whatever comes back:
+
+```ts
+import { ExpressionCue } from "@komaa/standin-sdk";
+
+const cues = new ExpressionCue();
+
+async function onTranscript(text: string, isFinal: boolean): Promise<void> {
+  const emotion = cues.cue(text);
+  if (emotion !== null) await session.express(emotion);
+}
+```
+
+Two things are happening there. It **re-reads the emotion on every chunk**, so the face self-corrects as the rest of a sentence arrives: "let me check that" cues neutral, and "let me check that, no way!!" cues surprised a moment later. And it **returns `null` when nothing changed**, which is what stops a partial-per-word stream from sending dozens of identical messages for one sentence. Waiting for the final transcript instead would land the cue as the sentence ends, with the face stale for the entire time a happy or apologetic reply was being spoken.
+
+One instance per call. What it remembers is the last emotion that call was told to wear, readable as `cues.lastSent`.
+
+While a tool keeps the caller waiting, hold a thinking face:
+
+```ts
+async function runTool(name: string): Promise<string> {
+  const waiting = cues.thinking(true);
+  if (waiting !== null) await session.express(waiting);
+  try {
+    return await tools.run(name);
+  } finally {
+    const done = cues.thinking(false);
+    if (done !== null) await session.express(done);
+  }
+}
+```
+
+While thinking is on, `cue()` returns `null` for everything: without that suppression a transcript chunk arriving mid-tool makes the avatar look finished while it is still working. Only a transition acts, so setting the same state twice sends nothing and a retry around the tool is harmless. Leaving sends `neutral` when thinking is still the last thing the call was told to wear, because the model may say nothing at all after a tool result, and with no transcript to re-infer from the face would stick mid-thought for the rest of the call. Call it from a `finally` so a tool that threw still leaves the face behind it.
+
+<Warning>
+  The lexicon is **English only**, and that is a decision rather than an oversight. An Arabic reply, or a reply in any other language, infers `neutral`. Neutral is always a safe face, and a silent guess at the language would put a confident wrong one on the tile.
+
+  Note the asymmetry before you go looking for a bug that is not there: the viseme table in the next sections **is** bilingual. The mouth moves on an Arabic reply. The face stays neutral.
+</Warning>
+
+## The viseme timeline
+
+```ts
+interface SpeechMark {
+  readonly tMs: number;
+  readonly visemeId: number;
+}
+```
+
+One mark is milliseconds from the start of the utterance, and which mouth shape to hold. `tMs` counts from the start of **that turn's audio**, never from the moment the message reaches the service.
+
+<Note>
+  This is the one place the two SDKs differ in shape. A mark is an **object** in TypeScript and a **tuple** in Python, where `SpeechMark` is declared as `tuple[int, int]` and the same timeline is written `[(0, 12), (200, 4)]`. Everything else here matches: the same ids, the same ordering rules, the same wire payload. Porting a plugin across rewrites the mark literals and nothing else.
+</Note>
+
+`session.sendSpeechMarks(marks)` sends the timeline for one utterance. `speechMarks(marks)` is the builder underneath, again exported for a plugin assembling its own wire messages. Both take any `Iterable<SpeechMark>`, so an array or a generator are equally welcome.
+
+```ts
+import { MAX_VISEME_ID } from "@komaa/standin-sdk";
+
+MAX_VISEME_ID; // 21
+```
+
+Visemes use the Azure Speech numbering, 0 to 21, which is what the avatar expects. The builder **sorts the marks ascending and drops anything outside that range**, along with any mark timed before zero, rather than passing it on. The avatar reads the timeline in order, so a mark out of sequence or a shape it cannot render does not cost one frame: it desynchronises the mouth for the rest of the utterance.
+
+## Measured beats still, guessed loses to still
+
+This is the rule that decides whether to send a timeline at all, and it is worth getting right before writing any of the code below.
+
+Send a timeline whenever it is spread over a duration you **measured**: the audio your worker actually sent for that turn, or real per-character timings from the speech provider. That is better than a still mouth, and on a realtime path it is the difference between an avatar that talks and one that never opens its mouth at all.
+
+Do not send a timeline spread over a duration **guessed** from text length or a words-per-minute rate. That is worse than sending nothing. The error in a guess compounds sentence after sentence, so the mouth drifts further from the voice the longer the call runs, and a mouth moving against the voice reads as broken in a way a still mouth never does.
+
+The distinction is the **duration**, not the phonemes. The mouth shapes are approximate either way.
+
+## A timeline from the text and the audio you sent
+
+Every realtime speech-to-speech model streams voice and hands back no phoneme timings, so there is nothing for `sendSpeechMarks` to carry and the mouth never moves on the default path. `TurnLipSync` closes that gap the one honest way open to a worker: it counts the audio the turn actually sent, byte by byte, and spreads the text over that measured length.
+
+```ts
+import { TurnLipSync } from "@komaa/standin-sdk";
+
+const lipsync = new TurnLipSync();
+
+// the audio sink
+for await (const chunk of modelAudio) {
+  await session.sendAudio(chunk);
+  lipsync.audioSent(chunk);
+}
+
+async function onTranscript(text: string, isFinal: boolean): Promise<void> {
+  if (isFinal) {
+    // once per turn, never on a partial
+    const marks = lipsync.finish(text);
+    if (marks.length > 0) await session.sendSpeechMarks(marks);
+  }
+}
+
+async function onBargeIn(): Promise<void> {
+  lipsync.cancel();
+}
+```
+
+`audioSent(pcm)` takes a PCM16 mono buffer. The constructor's `sampleRateHz` option defaults to the wire's own 16 kHz, which is what a plugin sending frames to the call is holding; pass the real rate when your sink counts at another one, as in `new TurnLipSync({ sampleRateHz: 24_000 })`. For a sink that hands over encoded audio, `audioSentMs(ms)` adds a duration directly, and it ignores a chunk that measures as zero, as negative, or as no number at all rather than taking the turn's count with it. Each chunk is rounded as it is added rather than kept as a running float, so both SDKs accumulate the same integer for the same stream of chunks.
+
+`finish(text)` returns the timeline and resets the counter, so the next turn starts from zero. It returns an empty array when no audio was sent or the text carries no mouth shape, and you send nothing in that case. Emit once per turn, on the final transcript: a partial would send an ever-lengthening timeline several times over and the avatar would restart the mouth mid-sentence.
+
+<Warning>
+  `cancel()` is not optional. On a barge-in the service drops audio the caller never heard, and a counter that keeps those milliseconds spreads the next turn's text over its own audio **plus the discarded audio**. The mouth runs long for the whole of that turn and every turn after it. Call it wherever you call [`cancelPlayback()`](/typescript-sdk/call-handler#cancelplayback-is-the-barge-in).
+</Warning>
+
+Underneath it, and usable on their own:
+
+| Name | What it is |
+|---|---|
+| `estimateVisemes(text, durationMs)` | The spread itself. Returns `SpeechMark[]`, strictly increasing in time. |
+| `visemeForChar(ch)` | The mouth shape a character wears, or `undefined`. |
+| `CHAR_VISEMES` | The character to shape map, frozen. |
+| `SILENCE_VISEME` | `0`, a closed mouth, and what the space between two words becomes. |
+
+`estimateVisemes` returns an empty array rather than throwing on anything it cannot use: no text, a duration that is zero, negative, infinite or not a number, or text with no mouth shape in it at all. `"3.5%"` is the last case, and an empty answer is the right one: mapping digits and punctuation to silence instead would punch a hole of closed-mouth frames into the middle of a spoken number. Only a space becomes silence. A run of one shape is one mark, timed at the first character of the run, because "mmm" is one mouth position and a mark per character would multiply the payload for an identical rendering.
+
+Times come back strictly increasing, and that is not cosmetic either. Spread a long sentence over a very short buffer and the step falls below half a millisecond, so neighbouring marks round onto the same one. The later shape wins, because a shape held for zero milliseconds is not renderable, and because `speechMarks` re-sorts by `(tMs, visemeId)` and would otherwise hand the avatar a different winner than the one the walk ended on.
+
+### What the table covers
+
+`CHAR_VISEMES` covers **all 26 Latin letters and all 28 Arabic letters** in one map, with the eight Arabic variant forms and the three short vowels alongside them:
+
+| Viseme | Latin | Arabic |
+|---|---|---|
+| 0 | the space between two words | the same |
+| 2 | `a` | `ا أ إ آ ى ة`, and fatha |
+| 4 | `e` | |
+| 6 | `i y` | `ي ئ`, and kasra |
+| 7 | `u w` | `و`, and damma |
+| 8 | `o` | |
+| 12 | `h` | `ه ح ع ء ؤ` |
+| 13 | `r` | `ر` |
+| 14 | `l` | `ل` |
+| 15 | `s z x` | `س ص ز` |
+| 16 | `j` | `ش ج` |
+| 18 | `f v` | `ف` |
+| 19 | `t d n` | `ت د ن ط ض ث ذ ظ` |
+| 20 | `k g c q` | `ك ق غ خ` |
+| 21 | `m b p` | `م ب` |
+
+Full coverage is not a nice-to-have. One common letter left out thins the timeline unevenly and the mouth stalls on that syllable, and without the Arabic rows at all an Arabic reply produces no tokens, carries no timeline, and the mouth simply does not move for half the people who will be on these calls. The stretch and doubling marks, sukun, shadda, tanween, the tatweel and every presentation form are deliberately absent, because they carry no mouth shape of their own and mapping them would insert mouth changes nobody spoke.
+
+`visemeForChar` lowercases and looks the character up as written, with **no Unicode normalization at all**. Folding presentation forms onto their base letter would change which characters map and the two SDKs would then disagree about the same string. A test reads the table out of the Python source and asserts the two are equal character for character, because a mouth that moves differently in two SDKs is a bug a customer finds by switching language rather than one CI finds by itself.
+
+The map is frozen and a write to it throws. It is also built with no prototype, so `visemeForChar("constructor")` and `visemeForChar("__proto__")` answer `undefined` like any other unmapped input instead of handing back an inherited function where the signature promises a viseme id.
+
+## Real timings when your provider has them
+
+When the speech provider returns per-character timings, use them. They are strictly better than an estimate and they cost nothing, since the synthesis call already produced them:
+
+```ts
+import { estimateVisemes, visemesFromAlignment } from "@komaa/standin-sdk";
+
+let marks = visemesFromAlignment(
+  result.characters,
+  result.characterStartTimesSeconds,
+);
+if (marks.length === 0) marks = estimateVisemes(text, lipsync.durationMs);
+```
+
+Core takes two plain arrays: the characters as the provider spoke them, and when each one starts in seconds. Normalising a vendor's field names is the speech plugin's job, not this function's.
+
+It is deliberately forgiving of the shapes providers actually return. Ragged arrays are walked to the shorter of the two, a timing that is not a finite number costs its own mark and nothing else, and a time before the start of the utterance is clamped to zero. Providers do return mismatched lengths and bare `NaN` values, and throwing there would lose the turn over a cosmetic hint.
+
+Fall back to `estimateVisemes` on an **empty result**, as above, rather than on a missing alignment. A provider that returned timings for punctuation only has an alignment and still needs the estimate.
+
+## When to send the timeline
+
+Where the duration is known before playback, which is a text-to-speech path, send the timeline **ahead of the first audio frame**. The service then has the whole mouth plan before the voice starts.
+
+On a realtime path the duration is only known once the turn ends, so the marks necessarily go out **after the last chunk was handed over**. That is correct while the service still holds that turn's audio buffered for playout, which is the normal case, and it is why the marks are worth sending at all on a path that would otherwise never move the mouth.
+
+## Your own video on the tile
+
+When your agent already produces video of its own (an avatar worker, a rendered face, a camera), that video can go on the tile instead of StandIn's own avatar.
+
+`session.sendTileFrame(jpeg, width, height)` puts one frame there. The SDK owns the sequence number and stamps the frame with the **outbound audio timeline**, `session.mediaTimeMs`, the same clock the voice is stamped on, so the two streams cannot disagree about what time it is. A wall clock keeps ticking through listening silence while the audio clock does not, so a wall-clock stamp would make the two look like they are drifting apart when they are in step.
+
+Sending frames is the easy part. Sending them at a rate that does not hurt the call is what `TileStream` owns:
+
+```ts
+import { TileStream } from "@komaa/standin-sdk";
+
+const tile = new TileStream(session);
+await tile.start();
+// ...
+tile.offerRgb(rgb, width, height); // as often as you like
+// ...
+await tile.aclose();
+```
+
+| Constructor argument | Default | Meaning |
+|---|---|---|
+| `session` | *(required)* | The `CallSession` the frames go to. |
+| `options.fps` | `12` | Clamped to 1 through `MAX_TILE_FPS`. |
+| `options.encoder` | `undefined` | Yours, or sharp is found for you. |
+| `options.maxBufferedBytes` | `327680` | The backpressure budget, in bytes of unflushed outbound data. |
+
+Everything but `session` arrives in one optional `TileStreamOptions`, so `new TileStream(session)` and `new TileStream(session, { fps: 20 })` are both complete calls.
+
+```ts
+import { MAX_TILE_FPS, TILE_HEIGHT, TILE_WIDTH } from "@komaa/standin-sdk";
+
+MAX_TILE_FPS; // 20
+TILE_WIDTH; // 640
+TILE_HEIGHT; // 360
+```
+
+Frames are encoded to 640 by 360, because shipping an avatar's native resolution only spends bandwidth on pixels the tile will not show. `MAX_TILE_FPS` is a sender-side sanity clamp rather than a protocol limit: a talking head gains nothing above 20, and a higher rate only spends local CPU on encoding and base64.
+
+**Latest wins, and each frame goes at most once.** Frames are offered into a single slot, never a queue. A ticker takes whatever is newest and sends it. So a source producing faster than the wire drops the middle frames rather than falling behind, and a source that stops producing goes quiet rather than repeating one stale frame forever. Silence is how a stream ends.
+
+That is right for video and would be wrong for audio. A dropped frame is a frame the caller never notices missing. A dropped audio buffer is a hole in a sentence, which is why the audio path buffers what it cannot send yet and this path throws it away.
+
+**Video yields to voice.** `TileStream` watches `session.bufferedBytes` and drops a frame rather than adding to it once the budget is exceeded, and it re-checks after an encode resolves, because audio may have filled the socket while the encoder was off the loop. The default budget of 320 KiB is deliberately tighter than the audio buffer cap of `MAX_AUDIO_BUFFER_BYTES`. Both streams share one socket, and a caller forgives a dropped frame far more readily than a break in the voice, so a loaded path goes quiet promptly rather than building up seconds of skew. `framesSent` and `framesDropped` are both readable, and a healthy call has some drops.
+
+`offerRgb` and `offerJpeg` never block and never throw. They are meant to be called from a decode loop that must not be slowed down by the wire. `offerJpeg(jpeg)` skips the encoder entirely, for a source that hands you JPEG already: nothing is re-encoded, no encoder needs to be installed at all, and the width and height default to the tile's own 640 by 360. `aclose()` is safe to call twice and on every teardown path.
+
+### The encoder
+
+Encoding packed RGB to JPEG needs [sharp](https://sharp.pixelplumbing.com/), which is an **optional peer dependency** of the package rather than a dependency:
+
+```bash
+npm install sharp
+```
+
+Pass your own `encoder` to skip it. An `Encoder` is any function taking packed RGB plus a width and a height and returning a promise of JPEG bytes:
+
+```ts
+type Encoder = (rgb: Buffer, width: number, height: number) => Promise<Buffer>;
+```
+
+The promise is a divergence from the Python twin, where an encoder is a plain synchronous callable and the stream hands it to a worker thread. Here the yielding is yours to do: the ticker awaits what you return, so an encoder that spends its time on the loop rather than off it holds up everything else the call is doing, the voice included.
+
+`jpegEncoder()` is what `start()` calls when you pass none. It resolves sharp at runtime and returns an `Encoder`, or `undefined` having logged why. Call it yourself if you would rather branch on the result before building the stream.
+
+<Note>
+  Without sharp and without an encoder of your own, the tile relay stays off with one line in the log and **the call is unaffected**. The caller hears your agent and sees StandIn's rendered avatar, which is what they would have seen anyway. sharp is optional precisely because most deployments never put their own video on the tile, and a dependency in every install is the wrong trade for a feature a minority uses. Note that `offerJpeg` still works in that state: it is only `offerRgb` that needs an encoder.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Vision" icon="eye" href="/typescript-sdk/vision">
+    The other half of the video lane: what the caller shows your agent.
+  </Card>
+  <Card title="Call tools" icon="wrench" href="/typescript-sdk/call-tools">
+    Giving a model the `express` tool, and the rest of the built-in surface.
+  </Card>
+</CardGroup>

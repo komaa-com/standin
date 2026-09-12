@@ -1,0 +1,169 @@
+---
+title: "Configuration"
+description: "Every STANDIN_ variable the SDK reads, the helpers for reading your own, and what a missing extra looks like, in the StandIn Python SDK."
+keywords: ["STANDIN_SECRET", "standin environment variables", "standin.config required optional flag", "vendor_host credential exfiltration", "PluginNotInstalled extra"]
+icon: "sliders"
+---
+
+The SDK is configured from the environment, and nothing here is read at import: a variable is read when the thing that needs it is built or called, so a worker that never opens a lane never needs that lane's settings. An explicit argument always wins over the environment, which is the rule to reach for whenever the value already lives somewhere better, such as a secret store your host resolved for you.
+
+## Everything the SDK reads
+
+Every `STANDIN_` variable, in one place, because configuring a deployment out of nine pages is how a deployment ends up half configured.
+
+| Variable | What it is for | Owned by |
+|---|---|---|
+| `STANDIN_SECRET` | Your StandIn connection secret. `CallServer` refuses to be built without it, `OutboundCaller` refuses to be built without it, and the chat lane falls back to it. | [CallServer](/python-sdk/call-server) |
+| `STANDIN_HOST` | Interface the call listener binds. Default `0.0.0.0`. | [CallServer](/python-sdk/call-server) |
+| `STANDIN_PORT` | Port the call listener binds. Default `9442`. Read with `int()`, so a non-numeric value fails when the server is built. | [CallServer](/python-sdk/call-server) |
+| `STANDIN_WS_PATH` | Path the call handshake arrives on. Default `/msteams/calling`. | [CallServer](/python-sdk/call-server) |
+| `STANDIN_CHAT_SECRET` | The key the chat lane signs with, read before `STANDIN_SECRET` and falling back to it. A managed deployment issues a separate key for chat; with one key for both lanes, leave this unset. | [Chat](/python-sdk/chat) |
+| `STANDIN_CHAT_URL` | The chat channel `ChatChannel` dials. It also derives the single origin chat attachments may be fetched from, so there is no second setting to get wrong. | [Chat](/python-sdk/chat) |
+| `STANDIN_WORKER_URL` | The StandIn control address an outbound call is posted to. StandIn gives it to you with your connection secret. A value that is not http or https, has no host, or carries credentials is refused when `OutboundCaller` is built, not when somebody tries to ring. | [Reaching people](/python-sdk/reaching-people) |
+| `STANDIN_STATE_DIR` | Where a parked outbound message lives until the person answers. Default `~/.standin/state`, created owner-only. Deliberately not a temp directory. | [Reaching people](/python-sdk/reaching-people) |
+| `STANDIN_OUTBOUND_ALLOW` | Comma-separated directory ids this agent may ring, read by `OutboundPolicy.from_env()`. Unset means outbound calling is off. | [Reaching people](/python-sdk/reaching-people) |
+| `STANDIN_OUTBOUND_MAX_PER_HOUR` | Calls placed in any rolling hour, across all targets. Default `6`. Zero means no cap, which is a choice rather than a default. | [Reaching people](/python-sdk/reaching-people) |
+| `STANDIN_TENANT_ID` | Which organisation a placed call belongs to. Operator configuration only: never the message, the metadata, the model or the caller. | [Reaching people](/python-sdk/reaching-people) |
+| `STANDIN_VISION_API_URL` | Chat-completions endpoint `FrameDescriber.from_env()` asks about a frame. | [Vision and the avatar](/python-sdk/vision) |
+| `STANDIN_VISION_MODEL` | The vision model to ask. With the URL unset or this unset, `from_env()` returns `None`, which is the signal a plugin uses to tell an agent that looking is not available here. | [Vision and the avatar](/python-sdk/vision) |
+| `STANDIN_VISION_API_KEY` | Sent to that endpoint as a bearer token when set. A local endpoint usually needs none. | [Vision and the avatar](/python-sdk/vision) |
+| `STANDIN_SHOW_ROOTS` | Directories a file may be **shown** from on the bot's tile, separated by `os.pathsep`. Empty means showing files is off. **Python SDK only**: the TypeScript SDK has no document renderer, so it reads no such variable. | [Vision and the avatar](/python-sdk/vision) |
+| `STANDIN_MEDIA_ROOTS` | Directories a local `MEDIA:` reference may be **read** from, separated by `os.pathsep`. Empty means local files are off. | [Sending a picture](/python-sdk/sending-pictures) |
+
+Every variable above except `STANDIN_SHOW_ROOTS` is read by the TypeScript SDK under the same name and with the same meaning, so a deployment that runs both workers configures both the same way. Two of the names are exported as constants rather than written out, in both SDKs, so your code and the SDK cannot drift apart:
+
+```python
+from standin import MEDIA_ROOTS_ENV, TENANT_ENV
+```
+
+### Three things that cost an afternoon
+
+- **A blank `STANDIN_CHAT_SECRET` falls through here, and does not in TypeScript.** `ChatChannel` reads the `secret=` argument, then `STANDIN_CHAT_SECRET`, then `STANDIN_SECRET`, and in Python an exported empty string is skipped like an unset one. The TypeScript twin stops at the first variable that is merely **present**, so `export STANDIN_CHAT_SECRET=` shadows a perfectly good `STANDIN_SECRET` there and the channel refuses to construct. Unset the variable rather than blanking it, and the two behave alike.
+- **`STANDIN_PORT` is read with `int()`.** A value that is not a number raises `ValueError` while `CallServer` is being built, and the message names the bad value rather than the variable it came from, so check a templated value before you export it. The TypeScript twin coerces instead and carries `NaN` as far as `start()`.
+- **A `STANDIN_WS_PATH` that reduces to `/` is refused** with `ws_path must be a real path such as /msteams/calling`. A worker listening at the root answers anything that reaches it, so this fails at construction rather than on the first call.
+
+The two roots variables are separate on purpose, and neither is a substitute for the other: `STANDIN_SHOW_ROOTS` governs what may be drawn onto the tile in a call, `STANDIN_MEDIA_ROOTS` governs what may be uploaded into a chat. Both default to empty, because the paths reaching them were chosen by a model that somebody is steering.
+
+## Reading your own
+
+Writing a plugin means reading the same five things every time: a value that must be set, one that may be, a boolean, a check that a vendor host is really that vendor's, and a header map. Use these rather than rolling your own, and the error somebody sees for a missing key reads the same whichever provider they picked. That is the whole reason the module exists: the messages had drifted once already, one wording per provider.
+
+```python
+from standin.config import flag, json_object, optional, required, vendor_host
+```
+
+<Note>
+These five are **not** re-exported at the package root in Python: `from standin import required` is an `ImportError`. Import them from `standin.config`. The TypeScript twin differs on both counts: it exports `required`, `optional`, `flag`, `vendorHost` and `jsonObject` from the package root, in camel case. Knowing that here is cheaper than discovering it as a failed import while porting a plugin.
+</Note>
+
+| Helper | Signature | Returns |
+|---|---|---|
+| `required` | `required(name, purpose="")` | The value, or raises `StandInError`. |
+| `optional` | `optional(name, default=None)` | The value, or `default`. Blank reads as absent. |
+| `flag` | `flag(name, default=False)` | `True` only when the value reads `true`. |
+| `vendor_host` | `vendor_host(name, default, suffix)` | The host, or raises `StandInError`. |
+| `json_object` | `json_object(name)` | `dict[str, str]`, `{}` when unset. |
+
+Every failure is a `StandInError`, which is at the package root: `from standin import StandInError`.
+
+```python
+api_key = required("ACME_API_KEY", "answer calls with Acme")
+# unset or blank -> StandInError: ACME_API_KEY is required to answer calls with Acme
+```
+
+`purpose` completes the sentence "X is required to ...", so write it as a verb phrase. The point is that the reader learns what they were trying to do, not only which string was empty.
+
+### Why a flag accepts only true
+
+`flag` trims and lowercases the value and compares it to the single string `true`. `TRUE` and `True` are therefore true, and `1`, `yes`, `on` and `y` are all **false**.
+
+That is deliberately strict, and the direction matters more than the strictness. The settings worth a flag in this SDK are guards, and a guard must not be turned off by a typo. If somebody writes `yes` where `true` was meant, the value reads as false: the guard stays in whatever state the default gives it rather than being switched by a string nobody validated. An unset variable is not a typo, so it returns `default` untouched.
+
+### Why a vendor host is pinned
+
+```python
+host = vendor_host("ACME_HOST", "api.acme.com", ".acme.com")
+# unset       -> "api.acme.com", the default
+# eu.acme.com -> "eu.acme.com"
+# acme.com    -> "acme.com", the suffix with its dot stripped
+# api.acme.com.attacker.net -> StandInError:
+#     ACME_HOST must be a acme.com host, got 'api.acme.com.attacker.net'
+```
+
+Your API key travels to whatever host the configuration names. A mistyped or injected host is therefore not a failed call, it is credential exfiltration, which is why this raises rather than warns: a warning gets logged after the key has already left.
+
+The host is accepted when it equals the suffix with its leading dot stripped, or when it ends with the suffix exactly as you passed it.
+
+<Warning>
+Pass the suffix **with** its leading dot. `".acme.com"` accepts `api.acme.com` and rejects `evilacme.com`. `"acme.com"` accepts both, because `evilacme.com` ends with it, and that is a guard that reads as present and is not.
+</Warning>
+
+### Why a header map is never logged
+
+```python
+headers = json_object("ACME_EXTRA_HEADERS")   # {} when unset
+# anything but a JSON object -> StandInError: ACME_EXTRA_HEADERS must be a JSON object
+```
+
+`json_object` parses a JSON object and coerces every key and value to `str`. Anything that is not a JSON object, including a valid JSON array or number, raises the same message.
+
+That message names the variable and stops. It never echoes the value, and neither does anything else on the failure path, because this helper exists for header maps: the value carries **your** credentials to somebody else's endpoint. A parse error that pretty-prints the malformed value is a bearer token in a log file, on the one code path most likely to be run with debug logging turned up.
+
+## A missing extra is not a broken install
+
+One package holds the SDK and every plugin, so `import standin` sits above code that references frameworks you may never install. Nothing under `standin.plugins` imports its framework while loading, and `import standin` imports no plugin at all. When you do touch one whose framework is absent, you get this rather than a bare traceback from inside somebody else's package:
+
+```python
+from standin import PluginNotInstalled
+```
+
+```
+standin.plugins.livekit needs 'livekit', which is not installed. The base
+standin-sdk install is deliberately dependency-light, so install it with:
+
+    pip install "standin-sdk[livekit]"
+```
+
+It carries `plugin`, `module` and `extra` as attributes, and it subclasses **both** `StandInError` and `ImportError`. The `ImportError` half is the one worth recording: `except ImportError`, `importlib` probes and `pytest.importorskip` all treat a missing extra as a missing import, which is exactly what it is, so a plugin that is absent degrades the same way any optional import does rather than escaping as an unfamiliar error class.
+
+It is also raised only when the framework **root** is what went missing. A framework that is installed but broken raises its own `ModuleNotFoundError` for its own dependency, and that propagates untouched: telling somebody to run `pip install "standin-sdk[livekit]"` when LiveKit is already installed sends them to fix something that is not broken.
+
+The real extras, from the package manifest:
+
+| Install | Pulls in | For |
+|---|---|---|
+| `pip install standin-sdk` | `aiohttp` | The base install. Answers a real Microsoft Teams call on its own. |
+| `pip install "standin-sdk[livekit]"` | `livekit-agents` | The LiveKit plugin. |
+| `pip install "standin-sdk[hermes-agent]"` | nothing | The Hermes plugin. Empty on purpose: Hermes Agent ships its own host and loads the adapter through an entry point, so there is nothing left to fetch. The extra stays declared so the documented install line resolves. |
+| `pip install "standin-sdk[tile]"` | `pillow` | Encoding your own frames for the avatar tile. |
+| `pip install "standin-sdk[render]"` | `pypdfium2`, `pillow` | Rendering a document onto the tile. Office documents additionally need LibreOffice on `PATH`, which is not a wheel. |
+| `pip install "standin-sdk[all]"` | all of the above | Everything. |
+
+`tile` and `render` are not plugins, so a missing one does not raise `PluginNotInstalled`. `jpeg_encoder()` returns `None` after logging a line that names the extra, and the tile relay simply does not run while audio is unaffected; rendering a PDF page without the extra raises `StandInError` with `showing a PDF needs the render extra`, followed by that install line. Both are optional because most deployments never put their own video on the tile and never show a file, and a PDF engine in every install is the wrong trade.
+
+The SDK requires Python 3.10 or newer.
+
+## Version
+
+```python
+import standin
+
+standin.__version__
+```
+
+```bash
+python -c "import standin; print(standin.__version__)"
+```
+
+One string, single-sourced from the package itself and read by the build, so the installed `standin-sdk` distribution and the imported module can never disagree about which version you are running. Quote it in a bug report: the wire protocol is versioned separately, and knowing both is what separates "your worker is old" from "the message was wrong". The TypeScript twin exports its own as `VERSION`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="CallServer" icon="server" href="/python-sdk/call-server">
+    The listener most of these variables configure.
+  </Card>
+  <Card title="Checking the install" icon="stethoscope" href="/python-sdk/checking-the-install">
+    Prove the configuration is right before a real call does.
+  </Card>
+</CardGroup>

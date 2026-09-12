@@ -1,0 +1,193 @@
+---
+title: "Meeting recap"
+description: "Minutes of the call, including what was shown on screen, with a Word document, in the StandIn TypeScript SDK."
+keywords: ["Microsoft Teams meeting minutes AI", "meeting recap agent", "docx minutes", "screen share in meeting notes"]
+icon: "file-lines"
+---
+
+A recap is the one thing people ask an agent for that it cannot do while the call is happening. It needs the whole conversation, so it happens at the end, and by then the caller has usually gone.
+
+What makes this one worth having is the second track. Every transcript-first recap tool is blind to the screen share. Your agent was on the call and could see it.
+
+## Keeping the record
+
+Feed the transcript as the call runs, from whichever callbacks your plugin already has.
+
+```ts
+import { Transcript } from "@komaa/standin-sdk";
+
+const transcript = new Transcript();
+transcript.add(callerName, "we should push the launch to March");
+transcript.add("Assistant", "noted", "assistant");
+transcript.addVisual("Sara's shared screen: the Q3 revenue dashboard");
+```
+
+The third argument is the `TurnRole`, `"caller"` unless you say otherwise, and it is what tells the
+two sides apart in the document. A consecutive turn from the same speaker **and** the same role is
+merged into the one before it, because a live transcript arrives as fragments and half-sentences fed
+to a model as separate turns make the minutes read like a stutter. Merging never crosses speakers or
+roles: filing one person's words under another's name is worse than no attribution, because it is
+confidently wrong.
+
+Both tracks are bounded, because a two-hour meeting sits in the memory of a process that is also carrying live audio. What survives is the tail, since the end of a meeting is what minutes are mostly about.
+
+Here are the numbers, so "bounded" is something you can check:
+
+| Bound | Value | What it limits |
+|---|---|---|
+| `MAX_TRANSCRIPT_TURNS` | `600` | Turns held at once. Also the default for `new Transcript({ maxEntries })`. |
+| `MAX_TRANSCRIPT_VISUALS` | `60` | Things shown. Far fewer than turns, because a screen changes slowly. |
+| `MAX_TRANSCRIPT_ENTRY_CHARS` | `1000` | How long one entry may grow before the next turn from the same speaker starts a fresh one. Without it, an hour of one person talking coalesces into a single ever-growing entry the entry count can never trim. |
+| `MAX_TRANSCRIPT_ENTRIES` | `40` | Entries that reach the summarising model. |
+| `MAX_TRANSCRIPT_CHARS` | `12000` | Characters that reach it. |
+| `RECAP_MIN_TURNS` | `4` | Below this there is no meeting to summarise, only a greeting. Advisory: it is exported for your plugin to check before it offers a recap at all. `postMinutes` itself only refuses an **empty** transcript, so a two-turn call still gets summarised if you ask. |
+
+<Note>
+All six resolve from `@komaa/standin-sdk`. In the Python SDK only `MAX_TRANSCRIPT_ENTRIES`,
+`MAX_TRANSCRIPT_ENTRY_CHARS` and `RECAP_MIN_TURNS` are on the barrel, and the three hard holding caps
+are `from standin.minutes import ...` there. Nothing about the values differs, only where you import
+them from.
+</Note>
+
+Consecutive visual repeats are collapsed. The vision lane describes whatever is on screen each time it is asked, and a slide nobody changed would otherwise fill the record with the same line.
+
+## Where the minutes go
+
+Decided **once**, before anything is written, and then passed to every later step.
+
+`resolveMinutesTarget` returns a `DeliveryTarget`, and it holds three fields and nothing else: a
+`kind` of `"thread"` or `"caller-dm"`, a `conversationId` and a `tenantId`.
+
+```ts
+import { ChatChannel, PersonalChats, resolveMinutesTarget } from "@komaa/standin-sdk";
+
+// One instance, shared: the chat lane fills it, the call lane reads it.
+const chats = new PersonalChats();
+const chat = new ChatChannel({ respond, chats });
+
+// ... and on a call:
+const target = resolveMinutesTarget({
+  threadId: session.start.threadId,
+  humanCount: participants,
+  callerAadId: session.start.caller.aadId,
+  callerChat: chats.forCaller({
+    callerAadId: session.start.caller.aadId,
+    tenantId: configuredTenant,
+  }),
+  sessionTenantId: session.start.tenantId,
+  configTenantId: configuredTenant,
+});
+```
+
+`chats` is a [`PersonalChats`](/typescript-sdk/chat#remembering-who-messaged-you),
+and it is the only honest answer to "where does a 1:1 call post?". A 1:1 call carries no thread, so
+the caller's own chat has to have been seen on the messages lane first. Both lanes have to be in one
+process for that, or the memory has to be shared some other way.
+
+This is the highest-consequence rule in the feature. A send with no pinned recipient falls back to whatever conversation the sending code last saw, and a customer's meeting minutes are the most sensitive thing this product produces. So the target is one immutable value, and no step downstream is allowed to work out a recipient of its own.
+
+Three details are load-bearing, and each one is a real failure that happened:
+
+**A meeting thread counts even when the participant count says one.** The count only arrives on topologies that send a participants frame, so on some deployments it stays pinned at 1. A count-only test delivered the minutes of a group call into one attendee's private chat.
+
+**The caller's own chat is admitted by scope, never by the shape of its id.** A personal chat and a group thread are told apart by what the message said its scope was. Testing the id prefix inverts it, admitting a team channel and rejecting every real private chat.
+
+**The tenant is the session's, then the configured one, then the remembered sender's.** Never the caller's own. A guest's tenant describes the organisation they came from, which is not the one this worker is bound to, and it is the one plausible-looking source that is actively wrong.
+
+A call that identifies nobody gets no target, and therefore no minutes. That is the correct outcome: there is no conversation that can be asserted as theirs.
+
+Pass a list when more than one place is admissible, best first. The walk advances **only on a 404**, because that is the only answer that proves nothing was delivered, so it is the only one where trying again cannot duplicate. A 401 or a 5xx would fail identically elsewhere.
+
+<Note>
+  The SDK's own chat lane writes to a socket and gets no status back, so it can report that a message was sent and never that it was refused. A poster built on it never advances the walk, which is the safe behaviour rather than a bug. Supply a poster that surfaces a status if you want the fallback to fire.
+</Note>
+
+## Writing it up
+
+```ts
+import { postMinutes } from "@komaa/standin-sdk";
+
+const result = await postMinutes(
+  (prompt) => consultant.ask(prompt),
+  transcript,
+  target,
+  postToChat,
+  {
+    documentDir: "/var/standin/minutes",
+    subtitle: `Call with ${caller} - ~${durationMin} min, ${humans} human participants.`,
+  },
+);
+await lane.say(result.spoken);
+```
+
+<Warning>
+Wrap the summariser in an arrow function rather than passing `consultant.ask` bare. It type-checks
+either way, because `Summariser` is just `(prompt: string) => Promise<string>`, and then throws a
+`TypeError` at the first private field read: `ask` reads the `Consultant`'s own state, and detached
+from its instance there is none. The same applies to any method you hand in as a callable here, and
+to your `Poster`.
+</Warning>
+
+`lane.say` above is the `VoiceLane` this call is running on. `CallSession` has no `say`: the session
+sends PCM, and turning a sentence into PCM is either the lane's job or your provider's. A realtime
+plugin has neither, and hands `result.spoken` back as the tool result instead, which is what the model
+then reads out.
+
+`documentDir` decides whether a Word document is written at all: omit it and none is. `subtitle` is
+the line under the document title. `assistantLabel` and `callerLabel` name the two sides in the
+attributed transcript.
+
+`postMinutes` never raises. It normally runs during teardown, where an exception takes the whole teardown with it, so every failure comes back as a sentence instead. It degrades a step at a time: a document that cannot be built sends text only, a send that fails is logged, and the spoken sentence is always there.
+
+Two outcomes look similar and are kept apart on purpose. A call with nothing said is told it was too short. A call with plenty said but no conversation to post into is told exactly that. Conflating them tells people their conversation did not count when it did.
+
+| Field | What it holds |
+|---|---|
+| `spoken` | One sentence for the agent to say. Always present, including on failure. |
+| `minutes` | The minutes themselves, so a caller can do something else with them when the post failed. |
+| `document` | Where the Word document was written, when one was. |
+| `delivered` | Whether the minutes actually reached the chat. |
+| `target` | Which of the admissible conversations took them. |
+
+Your poster may answer with a plain `true` or with a structured outcome carrying a status. Both are read correctly. Do not hand back an object and expect it to be truth-tested: every object is truthy, and a post StandIn rejected would report as delivered.
+
+## The document
+
+`writeMinutesDocx` emits a Word-openable `.docx` with no dependencies. A document format library would be a dependency every install pays for so that the small fraction who ask for minutes get a file, which is the wrong trade for an SDK.
+
+Give it `sections` from `parseMinutesSections` and it renders real headings instead of a flat wall of lines. A model asked for `### Key points` will write `## Key points` or `**Key points:**` depending on the model and the day, so all of those are accepted; a section that ends up with nothing in it is left out entirely rather than printed as a heading over white space.
+
+Give it `transcript` and it appends an attributed transcript, which is the half a transcript-only tool cannot produce: the call gave you the real speaker per utterance. A turn that already carries its own `Name:` prefix is written through untouched, because relabelling it as a generic caller destroys the attribution and double-prefixing reads as a transcription fault.
+
+<Note>
+  Delivery to the chat is text. The document is written to disk beside it, for whoever keeps the record. A meeting chat cannot be sent a file by a bot the way a person can, so a document promised into the chat would be a promise that quietly fails. Say so in the message rather than leaving it as a silent difference: `DOCUMENT_NOT_ATTACHED` is that sentence.
+</Note>
+
+## The prompt
+
+`minutesPrompt` asks for Key Points, Decisions, Action Items and, when anything was shown, Presented.
+
+The instruction not to infer what was on screen is the load-bearing one. A model handed "Sara shared a dashboard" will happily invent the numbers on it, and minutes that invent numbers are worse than minutes with a gap.
+
+`isSummaryRequest` recognises somebody asking for the write-up in conversation. It needs both halves: "summarise" alone is asked about a document, an email, or a page the agent is looking at.
+
+`MINUTES_TOOL` is the tool declaration, ready to register on `CallTools`. It is named `post_meeting_minutes`, not after the function that does the work, because a model handed two things with one name cannot tell which it is calling. It is not built in: whether there is anywhere to post depends on the call, and `resolveMinutesTarget` is what answers that.
+
+Answer the model the moment it calls, then run the recap. A tool call with no result stalls the turn, and the recap is a full model run plus a document write plus a send, so the caller sits in silence wondering whether anything is happening.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Chat" icon="comments" href="/typescript-sdk/chat">
+    `PersonalChats`, and the reply guard every post rests on.
+  </Card>
+  <Card title="Consulting" icon="hourglass" href="/typescript-sdk/consulting">
+    The slow agent that writes the minutes while the fast one talks.
+  </Card>
+  <Card title="Call tools" icon="wrench" href="/typescript-sdk/call-tools">
+    Registering `MINUTES_TOOL` alongside the built-ins.
+  </Card>
+  <Card title="Vision and the avatar" icon="eye" href="/typescript-sdk/vision">
+    Where the visual track of the transcript comes from.
+  </Card>
+</CardGroup>

@@ -1,0 +1,248 @@
+---
+title: "TypeScript SDK"
+description: "Put your AI agent into a Microsoft Teams call from Node.js. The shared core every StandIn TypeScript plugin builds on."
+keywords: ["StandIn TypeScript SDK", "Microsoft Teams voice agent", "Node.js voice bot", "@komaa/standin-sdk"]
+icon: "js"
+---
+
+`@komaa/standin-sdk` is one end of a socket. StandIn, the hosted service, joins the Microsoft Teams
+call and owns the Microsoft side entirely: the bot registration, Graph, media negotiation, the avatar
+tile. It then dials your worker, once per call, over an authenticated WebSocket. This package answers
+that dial, speaks the call protocol, and hands each call to your code.
+
+```bash
+npm install @komaa/standin-sdk
+```
+
+One package. The core is the bare specifier and imports nothing from the plugins, so
+`import { CallServer } from "@komaa/standin-sdk"` works with no framework installed. Each
+plugin is a subpath of that same package: `@komaa/standin-sdk/openclaw`,
+`@komaa/standin-sdk/echo`.
+
+## What you actually write
+
+The whole contract between the SDK and your agent is seven optional methods and a session object.
+Nothing extends anything, and you implement only the ones you care about.
+
+```ts
+import { CallServer, type CallSession } from "@komaa/standin-sdk";
+
+class EchoHandler {
+  #call: CallSession | undefined;
+
+  async onStart(session: CallSession) {
+    this.#call = session;
+  }
+
+  async onCallerAudio(pcm: Buffer) {
+    await this.#call?.sendAudio(pcm);
+  }
+}
+
+const server = new CallServer({ handlerFactory: () => new EchoHandler() });
+await server.start();
+```
+
+That is a worker that answers a real Microsoft Teams call. Everything else on this page is detail about what
+the server is doing behind those two methods.
+
+## Who owns what
+
+`CallServer` owns everything that is the same whichever agent framework is on the other side. That
+list is not marketing, it is the reason the SDK exists:
+
+- the socket StandIn dials, and the HMAC handshake with its single-use replay guard
+- capacity, draining, and the one-live-session-per-call rule
+- the wire protocol and the frame loop
+- outbound sequence numbers and the audio timeline, for voice and for the video tile alike
+- [five timers](/typescript-sdk/call-server#the-watchdogs): a pre-start watchdog, a caller-audio idle
+  watchdog, an `onStart` timeout, a stale-call reaper and an optional call-duration ceiling
+- idempotent teardown that always frees the slot
+
+Your handler owns the part that differs: what to do with a caller's voice, and where the reply comes
+from. If you find yourself reimplementing a sequence number or a resampler, that is a bug in the SDK,
+not in your plugin.
+
+## The two SDKs are one API
+
+The wire protocol, the audio format and the HMAC are byte-identical between the languages, and shared
+conformance vectors prove it rather than promising it: both protocol modules are generated from one
+schema and gated against drift.
+
+The core seam is the same in both. Same handler methods, same session, same watchdogs, same defaults.
+A handler ported between the languages changes only its method names.
+
+<CodeGroup>
+
+```python Python
+class MyHandler:
+    async def on_start(self, session: CallSession) -> None:
+        self._call = session
+
+    async def on_caller_audio(self, pcm: bytes) -> None:
+        await self._call.send_audio(pcm)
+```
+
+```ts TypeScript
+class MyHandler {
+  #call!: CallSession;
+
+  async onStart(session: CallSession) {
+    this.#call = session;
+  }
+
+  async onCallerAudio(pcm: Buffer) {
+    await this.#call.sendAudio(pcm);
+  }
+}
+```
+
+</CodeGroup>
+
+Python is snake_case, TypeScript is camelCase. Around the seam a few peripheral helpers exist in one
+language only, and the page each one belongs to says so where it applies. Three that matter here:
+
+- **Timers are milliseconds in TypeScript and seconds in Python.** `preStartTimeoutMs: 10000` against
+  `pre_start_timeout=10.0`. The names differ too, so the compiler catches a straight port, but a
+  config file copied between two workers does not.
+- **The two optional video callbacks sit differently.** Every `CallHandler` member is optional in
+  TypeScript, so `onVideoFrame` and `onSpeakerChange` are simply two more of them. Python keeps them
+  on separate `VideoHandler` and `SpeakerHandler` protocols, because `CallHandler` there is
+  `runtime_checkable` and a sixth member would break `isinstance` for every handler written before
+  the vision lane existed.
+- **Who may call the agent is a TypeScript module.** `isInboundCallAllowed` and its three companions
+  ship in this SDK only. A Python worker writes the same check in its own handler. See
+  [Security](/typescript-sdk/security#who-may-call-the-agent).
+
+## Why the plugin lists differ per language
+
+Most plugins exist in both languages, and the ones that do not are settled by the same
+rule: **which language a plugin lives in is decided by the framework it integrates, not by
+preference.**
+
+ElevenLabs, Deepgram, Cartesia and LiveKit are in both trees. [OpenClaw](/typescript-sdk/plugins/openclaw)
+has to be TypeScript because it loads inside the OpenClaw gateway process and consumes in-process
+objects there. Hermes Agent is Python for the same reason, in reverse.
+[OpenAI Realtime](/typescript-sdk/plugins/openai) is a TypeScript plugin.
+
+Nothing is missing from either side of the wire: both SDKs speak the same protocol, run the same
+conformance vectors, and answer the same calls.
+
+## What is in the package
+
+| Source | Import specifier | How it is used |
+|---|---|---|
+| `src/` | `@komaa/standin-sdk` | the core: `CallServer`, the session types, audio helpers, the chat and vision lanes |
+| `src/plugins/elevenlabs` | `@komaa/standin-sdk/elevenlabs` | an ElevenLabs agent takes the call, plus `standin-elevenlabs` |
+| `src/plugins/deepgram` | `@komaa/standin-sdk/deepgram` | a Deepgram Voice Agent takes the call, plus `standin-deepgram` |
+| `src/plugins/cartesia` | `@komaa/standin-sdk/cartesia` | a Cartesia Line agent takes the call, plus `standin-cartesia` |
+| `src/plugins/openai` | `@komaa/standin-sdk/openai` | an OpenAI Realtime model takes the call, plus `standin-openai` |
+| `src/plugins/livekit` | `@komaa/standin-sdk/livekit` | a LiveKit agent takes the call, plus `standin-livekit` |
+| `src/plugins/openclaw` | `@komaa/standin-sdk/openclaw` | loaded by the OpenClaw gateway, not imported by you |
+| `src/plugins/echo` | `@komaa/standin-sdk/echo` | the echo handler, plus the `standin-echo` command |
+
+Directory names are short because the repository is already called `standin`. The published name
+carries the scope because a registry is global. They are allowed to differ.
+
+## Requirements
+
+- Node.js 20 or newer for the core. The OpenClaw plugin follows its host and wants 22.19 or
+  newer, a requirement that travels with the `openclaw` peer dependency rather than with the core.
+- A StandIn identity and its connection secret, from [standin.komaa.com](https://standin.komaa.com)
+- A public `wss://` route to your worker, so StandIn can dial in
+
+## The names you reach for first
+
+Every name below resolves from the bare specifier. This is the handful a first worker needs, not the
+whole surface:
+
+```ts
+import {
+  CallServer,
+  type CallHandler,
+  type CallSession,
+  type HandlerFactory,
+  FrameAligner,
+  resamplePcm16,
+  SAMPLE_RATE_HZ,
+  REALTIME_SAMPLE_RATE_HZ,
+  FRAME_BYTES,
+  ChatChannel,
+  parseInbound,
+  buildReply,
+  signHandshake,
+  verifyHandshake,
+  setLogger,
+  StandInError,
+  VERSION,
+} from "@komaa/standin-sdk";
+```
+
+## The whole surface, by lane
+
+The barrel re-exports thirty-one modules. Nothing here is a subpath import: a plugin subpath is only ever
+a framework adapter, and every name below comes from `@komaa/standin-sdk` itself.
+
+| Lane | What is on the barrel | Page |
+|---|---|---|
+| The call seam | `CallServer`, `CallServerOptions`, `CallHandler`, `CallSession`, `HandlerFactory`, `StandInError`, `setLogger`, `VERSION` | [Call server](/typescript-sdk/call-server), [Call handler](/typescript-sdk/call-handler) |
+| Audio | `FrameAligner`, `resamplePcm16`, `frameDurationMs`, `pcm16Rms`, `FRAME_BYTES`, `FRAME_MS`, `SAMPLE_RATE_HZ`, `REALTIME_SAMPLE_RATE_HZ`, `BYTES_PER_SAMPLE`, `NUM_CHANNELS` | [Audio](/typescript-sdk/audio) |
+| Turn-taking | `VoiceLane`, `UtteranceSegmenter`, `PacedPlayback`, `decodeWav`, `encodeWav`, the `TROUBLE_*` sentences | [Turn-taking](/typescript-sdk/voice) |
+| Realtime providers | `StartupBuffer`, `MAX_PENDING_AUDIO`, `MAX_PENDING_CONTEXT`, `shouldSuppressEcho`, `ECHO_SUPPRESSION_WINDOW_MS`, `ECHO_BARGE_IN_RMS` | [Realtime providers](/typescript-sdk/realtime-providers) |
+| Group calls | `GroupGate`, `isAddressed`, `isVerbalInterrupt`, `isMeetingThread` | [Group calls](/typescript-sdk/group-calls) |
+| Vision | `FrameDescriber`, `parseVideoFrame`, `displayImage`, `displayFrame`, `VisionTools`, `KeyframeStore`, `VisionBudget`, `AmbientVision` | [Vision and the avatar](/typescript-sdk/vision) |
+| The avatar | `expression`, `inferEmotion`, `speechMarks`, `ExpressionCue`, `EMOTIONS`, `TurnLipSync`, `estimateVisemes`, `visemesFromAlignment`, `TileStream`, `jpegEncoder` | [The avatar](/typescript-sdk/avatar) |
+| Call tools | `CallTools`, `toolSchemas`, `BUILT_IN_TOOLS`, `SHOW_PAGE_TOOL` | [Call tools](/typescript-sdk/call-tools) |
+| Consulting | `Consultant`, `BackgroundTasks`, `CONSULT_TOOL`, `BACKGROUND_TASK_TOOL` | [Consulting](/typescript-sdk/consulting) |
+| Meeting recap | `Transcript`, `postMinutes`, `resolveMinutesTarget`, `minutesPrompt`, `writeMinutesDocx`, `MINUTES_TOOL` | [Meeting recap](/typescript-sdk/minutes) |
+| Chat | `ChatChannel`, `parseInbound`, `buildReply`, `isPersonal`, `PersonalChats` | [Chat](/typescript-sdk/chat) |
+| Attachments | `buildChatTurn`, `fetchChatImages`, `fetchChatAudio`, `transcribeVoiceMessages`, `spoolClip`, `chatImageDataUrl` | [Attachments in chat](/typescript-sdk/chat-attachments) |
+| Sending a picture | `outboundImage`, `sniffImageType`, `sanitizeImageName`, `parseMedia`, `loadMedia`, `mediaRoots` | [Sending a picture](/typescript-sdk/sending-pictures) |
+| Reaching people | `OutboundCaller`, `OutboundPolicy`, `OutboundLane`, `PendingMessages`, `VoiceDelivery`, `LiveCalls` | [Reaching people](/typescript-sdk/reaching-people) |
+| Security | `signHandshake`, `verifyHandshake`, `signBody`, `verifyBody`, `signRequest`, `canonicalRequest`, `isInboundCallAllowed`, `normalizePhoneNumber`, `assertPublicHttpUrl`, `fetchPublicImage` | [Security](/typescript-sdk/security) |
+| The wire itself | `SessionStart`, `Caller`, `parseMessage`, `parseSessionStart`, `decodePcm`, `contextSentences`, `audioFrame`, `assistantCancel`, `sessionEnd`, `pong` | [Security](/typescript-sdk/security#the-generated-wire-builders) |
+| Configuration | `optional`, `required`, `flag`, `jsonObject`, `vendorHost` | [Configuration](/typescript-sdk/configuration) |
+| Checking the install | `runSmoke`, `smokeReport`, `SyntheticCall` | [Checking the install](/typescript-sdk/checking-the-install) |
+
+## Where the SDK stops
+
+Three boundaries, and each is a real line rather than a disclaimer.
+
+**Speech and reasoning are your framework's.** Speech recognition, speech generation and the model
+that decides what to say belong to your provider. The SDK carries PCM in both directions and gives
+you the turn-taking pieces if you are assembling three vendors yourself, but nothing in this package
+transcribes, synthesizes or thinks.
+
+**The Microsoft side is StandIn's.** Bot registration, Graph, the media negotiation and the call
+itself. Your worker never holds a Bot Framework credential and never talks to Microsoft.
+
+**StandIn draws the avatar tile; the SDK sends it hints.** This is the boundary that is most often
+described wrongly, so it is worth stating exactly. The SDK does carry the vision and avatar lane:
+`session.express` names an emotion, `session.sendSpeechMarks` sends the viseme timeline that drives
+lip-sync, `session.displayImage` puts a picture on the tile, `session.sendTileFrame` puts one frame of
+your own video on it, and `session.latestVideoFrame` and `CallHandler.onVideoFrame` are how the
+caller's camera and screen share reach you. Whole modules back those: `avatar`, `lipsync`, `vision`,
+`visionTools`, `tile` and `ambient`, all on the barrel above. What the SDK does not do is render
+anything. It never composites a face, never encodes the avatar and never knows how the tile is drawn.
+See [Vision and the avatar](/typescript-sdk/vision) and [The avatar](/typescript-sdk/avatar).
+
+A frame type this SDK does not recognise is ignored by contract, which is what lets an older worker
+and a newer StandIn interoperate. That rule is about unknown frames, not about the avatar: those are
+frames the SDK itself sends and parses.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/typescript-sdk/quickstart">
+    From one install to a Microsoft Teams call that answers.
+  </Card>
+  <Card title="Call handler" icon="plug" href="/typescript-sdk/call-handler">
+    The seven methods and the session object.
+  </Card>
+  <Card title="Audio" icon="waveform" href="/typescript-sdk/audio">
+    Rates, frames, and the clipping trap.
+  </Card>
+  <Card title="Security" icon="shield" href="/typescript-sdk/security">
+    The two HMAC lanes and their replay windows.
+  </Card>
+</CardGroup>

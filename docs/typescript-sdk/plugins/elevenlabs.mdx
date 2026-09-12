@@ -1,0 +1,120 @@
+---
+title: "ElevenLabs plugin"
+description: "Answer Microsoft Teams calls with an ElevenLabs agent, using the StandIn TypeScript SDK."
+keywords: ["ElevenLabs Microsoft Teams", "elevenlabs voice agent", "@komaa/standin-sdk", "Microsoft Teams AI call"]
+icon: "waveform-lines"
+---
+
+`@komaa/standin-sdk/elevenlabs` puts [ElevenLabs](https://elevenlabs.io/docs/agents-platform/overview) on a real Microsoft Teams call. StandIn answers the call and dials your worker; this plugin answers that dial, opens one session per call, and relays the audio both ways.
+
+## Install and run
+
+There is nothing to install beyond the SDK. ElevenLabs is reached over an ordinary WebSocket, so this plugin adds no dependency.
+
+```bash
+npm install @komaa/standin-sdk
+```
+
+```bash
+export STANDIN_SECRET=...        # your StandIn connection secret
+export ELEVENLABS_API_KEY=...
+export ELEVENLABS_AGENT_ID=...
+npx standin-elevenlabs
+```
+
+Expose port `9442` at the `/msteams/calling` path and register the public `wss://` URL as your StandIn identity's agent voice URL. The full walkthrough is in the [Quickstart](/typescript-sdk/quickstart), and there is a runnable example at [examples/elevenlabs-msteams-connector](https://github.com/komaa-com/standin/tree/main/examples/elevenlabs-msteams-connector).
+
+## The audio format
+
+In the ElevenLabs dashboard, set the agent's input **and** output audio format to `pcm_16000`. An agent set to anything else is refused at the first frame rather than producing a whole call of garbled audio.
+
+## What the agent can do about the call
+
+Declare these as **client tools** on the agent. Nothing to implement: the plugin answers them.
+
+`clientTools()` returns the declarations, so there is nothing to retype into the dashboard:
+
+```ts
+import { clientTools } from "@komaa/standin-sdk/elevenlabs";
+
+console.log(JSON.stringify(clientTools(), null, 2));
+```
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `end_call` | none | Hang up. |
+| `express` | `emotion` | Set the avatar's expression on the bot's tile. See [The avatar](/typescript-sdk/avatar#the-emotion-the-face-wears). |
+| `show_image` | `url` **or** `dataBase64` + `mime`, plus `caption?` and `durationMs?` | Put a picture on the bot's video tile. |
+| `look` | `source?`, `question?` | Look at the caller's screen share or camera. |
+| `look_back` | `question?` | Look again at something the caller has already moved past. Recorded calls only. |
+
+`show_image` is widened here, because ElevenLabs is the one provider that can hand you the bytes inline: either form will do, so neither argument is required. A URL is chosen by the model, which the caller steers, so it is fetched through the SDK's guard: public hosts only, no private or link-local addresses, and the address is re-checked at connect time to close the DNS rebind window.
+
+<Warning>
+  **The fullscreen or overlay choice is not selectable on this plugin.** The other provider plugins route `show_image` through `CallTools.dispatch`, which honours a `display` parameter. This one has its own dispatch, and it reads `mode`. `clientTools()` still emits `display` with its `fullscreen` / `overlay` enum, because that comes from the shared tool spec, so the declaration you paste will offer the model a choice that is then dropped in silence. Deleting the `display` property from the pasted declaration changes nothing except that the model stops being offered it, which is the honest version. Either way the picture goes up with the default placement. [Fullscreen or beside your face](/typescript-sdk/vision#fullscreen-or-beside-your-face) covers what the two placements are for.
+</Warning>
+
+<Warning>
+  `look` and `look_back` upload the frame into the ElevenLabs conversation, which **stores** the caller's screen with a third party. They therefore work only while the Microsoft Teams call is being recorded. When it is not, the agent is told why rather than being left with silence.
+</Warning>
+
+## Inside your own worker
+
+The plugin is a `CallHandler` like any other:
+
+```ts
+import { CallServer } from "@komaa/standin-sdk";
+import {
+  ElevenLabsHandler,
+  elevenLabsConfigFromEnv,
+} from "@komaa/standin-sdk/elevenlabs";
+
+const config = elevenLabsConfigFromEnv();
+const server = new CallServer({
+  handlerFactory: () => new ElevenLabsHandler(config),
+});
+await server.start();
+```
+
+This handler takes its configuration as a **positional** argument, where the other provider plugins
+take an options object. Read it **once**, then close over it: `handlerFactory` runs once per call, so
+`new ElevenLabsHandler()` with nothing passed reads the environment again on every call, and a key
+removed after startup would fail the next caller rather than failing you. `serve()`, which is what
+`npx standin-elevenlabs` runs, does exactly this, then waits for `SIGINT` or `SIGTERM` before calling
+`server.aclose()`. `server.start()` returns as soon as the listener is bound, so a script that
+ends there exits before a single call arrives, and `aclose()` is what drains live calls and
+releases the port.
+
+## Configuration
+
+| Variable | What it is |
+|---|---|
+| `ELEVENLABS_API_KEY` | Your API key. Never logged, never sent to StandIn. |
+| `ELEVENLABS_AGENT_ID` | Which agent answers the call. |
+
+<Accordion title="Optional settings">
+
+| Variable | What it is |
+|---|---|
+| `ELEVENLABS_FIRST_MESSAGE` | Override the opening line. Applied only when the agent's security settings allow the override. |
+| `ELEVENLABS_ENVIRONMENT` | For an agent deployed to a named environment. |
+| `ELEVENLABS_AGENT_BRANCH_ID` | Answer with a specific branch. |
+| `ELEVENLABS_HOST` | Defaults to `api.elevenlabs.io`. Must be an elevenlabs.io host. |
+| `ELEVENLABS_LOG_TRANSCRIPTS` | Exactly `true` to log turns. Gated a second time on the call being recorded: a transcript in your logs is a recording of the caller that they did not agree to. |
+
+</Accordion>
+
+<Note>
+  The configuration is read once when the worker starts, not per call, so a missing key stops the worker at startup rather than surprising the first caller. `ELEVENLABS_HOST` is checked against the elevenlabs.io suffix, because your API key and agent id travel to it: a wrong host would be credential leakage rather than a failed call. The reasoning behind that shape is on [Configuration](/typescript-sdk/configuration).
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Realtime providers" icon="bolt" href="/typescript-sdk/realtime-providers">
+    The startup buffer, the echo guard and barge-in this plugin sits on.
+  </Card>
+  <Card title="Vision and the avatar" icon="eye" href="/typescript-sdk/vision">
+    What `look`, `show_image` and `express` reach.
+  </Card>
+</CardGroup>

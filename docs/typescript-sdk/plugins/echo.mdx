@@ -1,0 +1,190 @@
+---
+title: "Echo plugin"
+description: "The smallest StandIn plugin that answers a real Microsoft Teams call. Copy it to start your own."
+keywords: ["standin-sdk", "echo test Microsoft Teams call", "StandIn plugin template", "Node.js voice agent starter"]
+icon: "circle-play"
+---
+
+`@komaa/standin-sdk/echo` is the smallest thing that answers a real Microsoft Teams call. It sends
+the caller's voice back, and it exists for two reasons: to be the thing you run **before** you
+suspect your own agent, and to be the thing you copy when you start your own.
+
+If the echo answers, your secret, your tunnel and your StandIn identity are all correct, and whatever
+breaks next is your agent rather than the transport.
+
+## Run it
+
+Node.js 20 or newer:
+
+```bash
+npm install @komaa/standin-sdk
+STANDIN_SECRET="your-StandIn-connection-secret" npx standin-echo
+```
+
+Then expose port 9442 over HTTPS, register the public `wss://` URL with its `/msteams/calling` path as
+your StandIn identity's agent voice URL, call the identity from Microsoft Teams, and talk. You should hear
+yourself. The [quickstart](/typescript-sdk/quickstart) has the portal steps and
+[Expose your agent](/expose) has the mount command and the probes.
+
+## The whole plugin
+
+```ts
+import { CallServer, type CallSession } from "@komaa/standin-sdk";
+
+export class EchoHandler {
+  #call: CallSession | undefined;
+
+  async onStart(session: CallSession): Promise<void> {
+    this.#call = session;
+    console.info(
+      `call ${session.callId} from ${session.start.caller.displayName ?? "unknown"}`,
+    );
+  }
+
+  async onCallerAudio(pcm: Buffer): Promise<void> {
+    // Your agent goes here. PCM16, 16 kHz, mono, little-endian, the same format
+    // sendAudio expects back.
+    await this.#call?.sendAudio(pcm);
+  }
+
+  async onGoodbye(text: string): Promise<void> {
+    // StandIn is ending the call and wants this line spoken first. A real plugin
+    // would interrupt the agent and say it.
+    console.info(`goodbye: ${text}`);
+  }
+}
+
+export async function serve(): Promise<void> {
+  const server = new CallServer({ handlerFactory: () => new EchoHandler() });
+  await server.start();
+
+  await new Promise<void>((resolve) => {
+    const stop = (): void => resolve();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+
+  await server.aclose();
+}
+```
+
+That is the whole plugin, minus the CLI wrapper behind `standin-echo`, the licence header and the
+doc comments. One line differs from the file in the repository on purpose: that copy reaches the core
+by relative path, because it lives inside the package, and yours reaches it by package name. Note
+what is **not** there: no sequence number, no timestamp, no handshake, no capacity check, no watchdog. All of that
+is [`CallServer`](/typescript-sdk/call-server).
+
+Note also that this handler defines three of the seven methods on `CallHandler`. `onVideoFrame`,
+`onSpeakerChange`, `onContext` and `aclose` are absent because it does not need them, and the server
+treats a missing method as a no-op: the interface is all-optional, so nothing extends anything. See
+[Call handler](/typescript-sdk/call-handler#the-seven-methods).
+
+## Make it yours
+
+Replace `onCallerAudio` with your framework's agent loop. Everything else stays.
+
+```ts
+async onCallerAudio(pcm: Buffer): Promise<void> {
+  const reply = await myFramework.respond(pcm);
+  await this.#call?.sendAudio(reply);
+}
+```
+
+If your framework speaks at 24 kHz, read [Audio](/typescript-sdk/audio) before you write a resampler.
+The SDK ships one, along with the frame aligner that stops every turn losing its last few
+milliseconds.
+
+## Write your own handler
+
+You do not need the SDK's source, a fork or a registration to write a handler. Copy the class out of
+the block above into your own module, change `onCallerAudio`, and pass it as `handlerFactory`:
+
+```ts
+import { CallServer } from "@komaa/standin-sdk";
+
+const server = new CallServer({ handlerFactory: () => new MyHandler() });
+await server.start();
+```
+
+There is nothing to declare anywhere. `CallHandler` is an interface of optional methods, so your
+class is a handler because it has the right method names, not because it extends or registers. That
+is the whole seam, and it is the same one every plugin on this site uses.
+
+## What to add first
+
+Once the echo answers, three things turn the template into something usable:
+
+**Barge-in.** `await session.cancelPlayback()` the moment your provider reports the caller started
+speaking. Without it the bot keeps talking over the caller for the length of the buffered audio. See
+[`cancelPlayback()` is the barge-in](/typescript-sdk/call-handler#cancelplayback-is-the-barge-in).
+
+**Frame alignment.** If your provider speaks 24 kHz, resample and align before sending. See
+[Audio](/typescript-sdk/audio).
+
+**Cleanup.** Add `aclose(reason)` to close your provider socket. It is always called exactly once, on
+every path, before the slot is freed.
+
+## Contribute a plugin to the SDK
+
+This part is different: it is for adding a plugin to the `@komaa/standin-sdk` package itself, so it
+assumes a clone of the repository rather than an `npm install`. If you are building for your own
+deployment, the two sections above are the ones you want.
+
+Every plugin lives inside the one package, so adding one publishes nothing new.
+
+<Steps>
+
+<Step title="Copy the directory">
+```bash
+cp -r libraries/typescript/src/plugins/echo libraries/typescript/src/plugins/<name>
+```
+</Step>
+
+<Step title="Add its subpath export">
+One entry under `exports` in `libraries/typescript/package.json`, pointing
+`@komaa/standin-sdk/<name>` at the emitted `dist/plugins/<name>/index.js`. The directory name stays
+short; the published specifier carries the scope, because a registry is global.
+
+The copied directory brings a `cli.ts` with it, so add the matching `bin` entry in the same file,
+`standin-<name>` pointing at `dist/plugins/<name>/cli.js`, or `npx standin-<name>` resolves to
+nothing and the install line on your page is wrong from the first day.
+</Step>
+
+<Step title="Keep the framework optional">
+A framework the plugin needs is a **peer** dependency, marked optional in `peerDependenciesMeta`.
+The core imports nothing from `plugins/`, so somebody installing the SDK for one plugin never drags
+in another's framework.
+</Step>
+
+<Step title="Check it">
+```bash
+make ts-check
+```
+`make py-check` is its Python counterpart, and `make check` runs both halves plus the protocol and
+documentation checks. Then open a pull request against
+[`komaa-com/standin`](https://github.com/komaa-com/standin).
+</Step>
+
+</Steps>
+
+Write a plugin when a framework requires its own plugin registry, private internals, or worker
+lifecycle hooks. If the difference is only configuration, prefer a preset or a documentation page.
+A plugin needs a named maintainer who will retest it for upstream minor versions.
+
+## Parity
+
+The Python twin of this file is `standin.plugins.echo`, the same handler with the same method
+names in that language's casing. Core SDK features land in both languages in the same change, with
+matching defaults and behaviour. The full guide is
+[CONTRIBUTING.md](https://github.com/komaa-com/standin/blob/main/CONTRIBUTING.md).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call handler" icon="code" href="/typescript-sdk/call-handler">
+    All seven methods, with a full worked handler.
+  </Card>
+  <Card title="CallServer" icon="server" href="/typescript-sdk/call-server">
+    Every option you may want to change once calls are real.
+  </Card>
+</CardGroup>

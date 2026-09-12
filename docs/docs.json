@@ -1,0 +1,244 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "StandIn",
+  "description": "Put your AI agent into a Microsoft Teams call. One SDK in Python and TypeScript, framework plugins, and runnable examples.",
+  "colors": {
+    "primary": "#16A34A",
+    "light": "#07C983",
+    "dark": "#15803D"
+  },
+  "favicon": "/favicon.svg",
+  "seo": {
+    "indexing": "all",
+    "metatags": {
+      "og:type": "website",
+      "og:site_name": "StandIn",
+      "og:image": "https://www.komaa.com/opengraph-image",
+      "og:image:width": "1200",
+      "og:image:height": "630",
+      "twitter:card": "summary_large_image"
+    }
+  },
+  "navigation": {
+    "products": [
+      {
+        "product": "Home",
+        "icon": "house",
+        "groups": [
+          {
+            "group": "Welcome",
+            "icon": "hand-wave",
+            "pages": [
+              "index",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Microsoft Teams setup",
+            "icon": "microsoft",
+            "pages": [
+              "teams/overview",
+              "teams/connection-modes",
+              "teams/azure-bot",
+              "teams/app-package",
+              "teams/publish"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "icon": "book",
+            "pages": [
+              "concepts/architecture",
+              "concepts/modes",
+              "concepts/features"
+            ]
+          },
+          {
+            "group": "Dev tools",
+            "icon": "wrench",
+            "pages": [
+              "expose",
+              "community",
+              "troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "product": "Python SDK",
+        "description": "standin-sdk: answer Microsoft Teams calls from Python",
+        "icon": "python",
+        "tabs": [
+          {
+            "tab": "Docs",
+            "icon": "book",
+            "groups": [
+              {
+                "group": "Get started",
+                "pages": [
+                  "python-sdk/overview",
+                  "python-sdk/quickstart"
+                ]
+              },
+              {
+                "group": "The SDK",
+                "icon": "code",
+                "pages": [
+                  "python-sdk/call-server",
+                  "python-sdk/call-handler",
+                  "python-sdk/audio",
+                  "python-sdk/voice",
+                  "python-sdk/realtime-providers",
+                  "python-sdk/group-calls",
+                  "python-sdk/vision",
+                  "python-sdk/avatar",
+                  "python-sdk/call-tools",
+                  "python-sdk/consulting",
+                  "python-sdk/minutes",
+                  "python-sdk/chat",
+                  "python-sdk/chat-attachments",
+                  "python-sdk/sending-pictures",
+                  "python-sdk/reaching-people",
+                  "python-sdk/configuration",
+                  "python-sdk/checking-the-install",
+                  "python-sdk/security"
+                ]
+              },
+              {
+                "group": "Plugins",
+                "icon": "plug",
+                "pages": [
+                  "python-sdk/plugins/elevenlabs",
+                  "python-sdk/plugins/deepgram",
+                  "python-sdk/plugins/cartesia",
+                  "python-sdk/plugins/livekit",
+                  "python-sdk/plugins/hermes-agent",
+                  "python-sdk/plugins/echo"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "product": "TypeScript SDK",
+        "description": "@komaa/standin-sdk: answer Microsoft Teams calls from TypeScript",
+        "icon": "js",
+        "tabs": [
+          {
+            "tab": "Docs",
+            "icon": "book",
+            "groups": [
+              {
+                "group": "Get started",
+                "pages": [
+                  "typescript-sdk/overview",
+                  "typescript-sdk/quickstart"
+                ]
+              },
+              {
+                "group": "The SDK",
+                "icon": "code",
+                "pages": [
+                  "typescript-sdk/call-server",
+                  "typescript-sdk/call-handler",
+                  "typescript-sdk/audio",
+                  "typescript-sdk/voice",
+                  "typescript-sdk/realtime-providers",
+                  "typescript-sdk/group-calls",
+                  "typescript-sdk/vision",
+                  "typescript-sdk/avatar",
+                  "typescript-sdk/call-tools",
+                  "typescript-sdk/consulting",
+                  "typescript-sdk/minutes",
+                  "typescript-sdk/chat",
+                  "typescript-sdk/chat-attachments",
+                  "typescript-sdk/sending-pictures",
+                  "typescript-sdk/reaching-people",
+                  "typescript-sdk/configuration",
+                  "typescript-sdk/checking-the-install",
+                  "typescript-sdk/security"
+                ]
+              },
+              {
+                "group": "Plugins",
+                "icon": "plug",
+                "pages": [
+                  "typescript-sdk/plugins/elevenlabs",
+                  "typescript-sdk/plugins/deepgram",
+                  "typescript-sdk/plugins/cartesia",
+                  "typescript-sdk/plugins/openai",
+                  "typescript-sdk/plugins/livekit",
+                  "typescript-sdk/plugins/openclaw",
+                  "typescript-sdk/plugins/echo"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "redirects": [
+    {
+      "source": "/teams-app",
+      "destination": "/teams/azure-bot"
+    },
+    {
+      "source": "/openclaw/:slug*",
+      "destination": "/typescript-sdk/plugins/openclaw"
+    },
+    {
+      "source": "/hermes/:slug*",
+      "destination": "/python-sdk/plugins/hermes-agent"
+    },
+    {
+      "source": "/livekit/:slug*",
+      "destination": "/python-sdk/plugins/livekit"
+    },
+    {
+      "source": "/elevenlabs/:slug*",
+      "destination": "/python-sdk/plugins/elevenlabs"
+    }
+  ],
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/komaa-com/standin"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Get started",
+      "href": "/quickstart"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/komaa-com/standin"
+    }
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude",
+      "perplexity",
+      "mcp",
+      "cursor",
+      "vscode"
+    ]
+  },
+  "integrations": {
+    "ga4": {
+      "measurementId": "G-M02N9C42XH"
+    }
+  }
+}

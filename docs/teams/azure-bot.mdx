@@ -1,0 +1,205 @@
+---
+title: "Create the Azure bot"
+description: "Register a Microsoft Entra app, create the Azure Bot resource, enable Microsoft Teams calling, and grant the Graph permissions StandIn needs."
+keywords: ["Azure bot registration","Microsoft Entra app registration","Microsoft Teams calling webhook","Microsoft Graph permissions","admin consent","Azure Bot Microsoft Teams channel"]
+---
+
+Part 1 of the [Microsoft Teams setup](/teams/overview). At the end of this page you will have a bot identity
+(client ID + tenant ID + client secret) wired to StandIn's endpoints, with the Graph permissions
+consented. All screenshots are from the Azure portal; the values shown are placeholders.
+
+## 1. Register a Microsoft Entra app
+
+In the [Azure portal](https://portal.azure.com), search for **App registrations**:
+
+<Frame caption="The portal search finds App registrations under Services.">
+  <img src="/images/teams/search-app-registrations.png" alt="Azure portal search bar with App registrations typed in and the App registrations service shown in the results" />
+</Frame>
+
+Select **New registration**:
+
+- **Name**: anything you like (users never see it; the Microsoft Teams app name comes from the manifest).
+- **Supported account types**: **Single tenant only** is the right choice for a bot that serves
+  your own organization.
+- **Redirect URI**: leave empty.
+
+<Frame caption="App registrations > New registration: name it and keep Single tenant only.">
+  <img src="/images/teams/entra-register-app.png" alt="Register an application form in the Azure portal with a name filled in and Single tenant only selected" />
+</Frame>
+
+Official reference: [Register an application with the Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app).
+
+## 2. Record the IDs
+
+On the app's **Overview** page, copy two values - you will need them repeatedly:
+
+- **Application (client) ID** - this is your **`botId`** (and the `MicrosoftAppId` of the Azure Bot).
+- **Directory (tenant) ID** - your tenant.
+
+<Frame caption="The Overview page shows the Application (client) ID and Directory (tenant) ID.">
+  <img src="/images/teams/entra-app-overview.png" alt="Entra app registration overview page highlighting the client ID and tenant ID fields" />
+</Frame>
+
+## 3. Create a client secret
+
+Under **Certificates & secrets**, select **New client secret** and copy the secret **Value**
+immediately - it is shown only once. StandIn uses this credential (App ID + secret + tenant) to
+authenticate as your bot; you provide it in the StandIn dashboard when you register the identity.
+
+<Warning>
+  Treat the client secret like a password: store it in a secret manager, never commit it, and set a
+  reminder before its expiry date - calls stop when it lapses.
+</Warning>
+
+## 4. Create the Azure Bot resource
+
+Search the portal for **Bot** and open **Bot Services**:
+
+<Frame caption="The portal search: Bot Services is where Azure Bot resources live.">
+  <img src="/images/teams/search-bot-services.png" alt="Azure portal search bar with Bot typed in and the Bot Services service shown in the results" />
+</Frame>
+
+Create an **Azure Bot** and fill in the basics:
+
+- **Bot handle / subscription / resource group**: your choice.
+- **Data residency**: Global is typical.
+- **Pricing tier**: the free **F0** tier is fine (Standard channels like Microsoft Teams are free).
+- **Type of App**: **Single Tenant**, matching the app registration.
+
+<Frame caption="Create an Azure Bot: pick a handle, subscription, and pricing tier.">
+  <img src="/images/teams/azure-bot-basics.png" alt="Create an Azure Bot basics form in the Azure portal" />
+</Frame>
+
+Under **Microsoft App ID**, choose **Use existing app registration** and paste the **App ID**
+(client ID) and **App tenant ID** from step 2, then **Review + create**.
+
+<Frame caption="Creation type: Use existing app registration, with the client ID and tenant ID from step 2.">
+  <img src="/images/teams/azure-bot-app-id.png" alt="Create an Azure Bot form showing Use existing app registration selected with App ID and tenant ID fields" />
+</Frame>
+
+Once deployment finishes, the resource's **Overview** shows the essentials - pricing tier, location,
+and (after step 7) the messaging endpoint:
+
+<Frame caption="The Azure Bot Overview page after creation.">
+  <img src="/images/teams/azure-bot-overview.png" alt="Azure Bot resource overview page showing resource group, subscription, pricing tier, and messaging endpoint" />
+</Frame>
+
+Official reference: [Create an Azure Bot resource](https://learn.microsoft.com/en-us/azure/bot-service/abs-quickstart).
+
+## 5. Enable the Microsoft Teams channel
+
+Open the new Azure Bot resource, go to **Settings → Channels**, and select **Microsoft Teams**.
+Accept the terms and apply; the channel appears under connected channels as **Healthy**.
+
+<Frame caption="Channels: Microsoft Teams connected and Healthy.">
+  <img src="/images/teams/bot-channels-teams.png" alt="Azure Bot Channels page showing the Microsoft Teams channel connected with a healthy status" />
+</Frame>
+
+Opening the channel shows three tabs - **Messaging**, **Calling**, and **Publish**. Messaging is on
+by default (**Microsoft Teams Commercial** is right for most tenants); the next step configures
+Calling.
+
+<Frame caption="The Microsoft Teams channel opens on the Messaging tab.">
+  <img src="/images/teams/teams-channel-messaging.png" alt="Microsoft Teams channel Messaging tab showing Microsoft Teams Commercial selected" />
+</Frame>
+
+## 6. Enable calling and set the webhook
+
+Still in the Microsoft Teams channel, open the **Calling** tab:
+
+1. Check **Enable calling**.
+2. Set **Webhook (for calling)** to the **calling webhook URL from your StandIn dashboard** (shown
+   on your identity after you register it).
+3. **Apply**.
+
+<Frame caption="Calling tab: Enable calling, webhook from your StandIn dashboard.">
+  <img src="/images/teams/teams-channel-calling.png" alt="Microsoft Teams channel Calling tab with Enable calling checked and the webhook field highlighted" />
+</Frame>
+
+Official references: [Registering a calling bot](https://microsoftgraph.github.io/microsoft-graph-comms-samples/docs/articles/calls/register-calling-bot.html)
+(Microsoft Graph communications samples - covers this whole page end to end) and
+[Register a calling bot for Microsoft Teams](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/calls-and-meetings/registering-calling-bot).
+
+## 7. Set the messaging endpoint (optional, for chat)
+
+Voice works without this step. If you also want **Microsoft Teams chat**, go to **Settings → Configuration**
+and set **Messaging endpoint** to the URL from your StandIn dashboard.
+
+<Frame caption="Configuration: the messaging endpoint powers Microsoft Teams chat.">
+  <img src="/images/teams/azure-bot-messaging-endpoint.png" alt="Azure Bot Configuration page with the messaging endpoint field highlighted" />
+</Frame>
+
+<Note>
+  This messaging endpoint matters only if you serve Bot Framework chat yourself. On a
+  bring-your-own-bot identity you also set an **Agent chat URL** in the StandIn dashboard: the
+  `https://` URL where your runtime's own Microsoft Teams channel listens, typically
+  `https://<your-public-host>/api/messages` in front of `127.0.0.1:3978` (paste the bare host and
+  StandIn appends the path). Until then, chat messages get a "chat endpoint not configured" reply.
+
+  That endpoint is your runtime's, not the SDK's. The consolidated SDK's chat lane is dialed **out**
+  by `ChatChannel`, needs no URL registered and no port exposed, and is available on managed
+  connections. See [Expose your agent](/expose) and
+  [Architecture](/concepts/architecture#two-lanes).
+</Note>
+
+<Warning>
+  **Two different sets of endpoints, and mixing them up breaks the setup.** The URLs on *this* page -
+  the calling webhook in step 6 and the messaging endpoint in step 7 - are **StandIn's** hosted
+  addresses (`https://<identity>.standin.komaa.com/api/calling` and `/api/messages`), taken from your
+  dashboard and pasted into Azure. The `/msteams/calling` and `/api/messages` paths you publish from
+  your own machine are a **separate layer**, and they go in the StandIn dashboard, never in the Azure
+  portal.
+</Warning>
+
+## 8. Grant Graph permissions
+
+Back on the **app registration** (the same Entra app as `botId`): **API permissions → Add a
+permission → Microsoft Graph → Application permissions**, add the list below, then select
+**Grant admin consent** for your tenant (requires an admin).
+
+<Frame caption="API permissions > Add a permission > Microsoft Graph.">
+  <img src="/images/teams/graph-add-permission.png" alt="Azure portal API permissions blade with Add a permission opening the Microsoft Graph API panel" />
+</Frame>
+
+This is the canonical list. It applies to every SDK, plugin and legacy bridge alike:
+
+<table>
+  <thead>
+    <tr>
+      <th style={{ minWidth: "18rem" }}>Permission</th>
+      <th>Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td style={{ whiteSpace: "nowrap" }}>`Calls.JoinGroupCall.All`</td><td>answer / join Microsoft Teams calls and meetings</td></tr>
+    <tr><td style={{ whiteSpace: "nowrap" }}>`Calls.JoinGroupCallAsGuest.All`</td><td>join meetings as a guest participant</td></tr>
+    <tr><td style={{ whiteSpace: "nowrap" }}>`Calls.AccessMedia.All`</td><td>access real-time Microsoft Teams call audio/video media</td></tr>
+    <tr><td style={{ whiteSpace: "nowrap" }}>`Calls.Initiate.All`</td><td>outbound 1:1 "call me back" (skip if unused)</td></tr>
+    <tr><td style={{ whiteSpace: "nowrap" }}>`Calls.InitiateGroupCall.All`</td><td>outbound group "call me back" (skip if unused)</td></tr>
+    <tr><td style={{ whiteSpace: "nowrap" }}>`Chat.Read.All`</td><td>resolve chat / thread ids and read message context</td></tr>
+    <tr><td style={{ whiteSpace: "nowrap" }}>`ChatMessage.Read.Chat`</td><td>read messages in chats the bot is installed in</td></tr>
+    <tr><td style={{ whiteSpace: "nowrap" }}>`Sites.ReadWrite.All`</td><td>upload files / minutes to SharePoint (OneDrive) for chat attachments (optional; not needed on Hermes - its minutes file card rides the Bot Framework attachment contract with bot credentials only)</td></tr>
+  </tbody>
+</table>
+
+After consent, every row shows a green **Granted** status:
+
+<Frame caption="Configured permissions with admin consent granted for the calling permissions.">
+  <img src="/images/teams/api-permissions-granted.png" alt="API permissions page listing the Calls application permissions, each with a green Granted status" />
+</Frame>
+
+Official references: [Registering a calling bot](https://microsoftgraph.github.io/microsoft-graph-comms-samples/docs/articles/calls/register-calling-bot.html)
+(lists the `Calls.*` permissions), [Grant tenant-wide admin consent](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent),
+and the [cloud communications API overview](https://learn.microsoft.com/en-us/graph/cloud-communications-get-started).
+
+## Checkpoint
+
+You should now have:
+
+- [x] **Client ID** (`botId`), **tenant ID**, and a **client secret**
+- [x] An **Azure Bot** with the **Microsoft Teams channel** enabled
+- [x] **Calling enabled** and the webhook pointed at StandIn
+- [x] (Optional) **Messaging endpoint** set for chat
+- [x] Graph permissions **admin-consented**
+
+Next: [Get the Microsoft Teams app package](/teams/app-package).

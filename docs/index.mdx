@@ -1,0 +1,186 @@
+---
+title: "StandIn"
+description: "Put your AI agent into a Microsoft Teams call. One SDK in Python and TypeScript, framework plugins, and runnable examples."
+keywords: ["Microsoft Teams AI agent","Microsoft Teams voice agent","StandIn SDK","standin-sdk","@komaa/standin-sdk","Microsoft Teams call handler","LiveKit Microsoft Teams","Hermes Microsoft Teams","OpenClaw Microsoft Teams"]
+---
+
+**StandIn is your AI teammate in Microsoft Teams calls.** The hosted service joins the call and owns
+the Microsoft side. The SDK runs in your worker, answers the call StandIn dials, and hands the audio
+to your agent.
+
+There is one SDK, in two languages, with the same contract in both:
+
+<CardGroup cols={2}>
+  <Card title="Python SDK" icon="python" href="/python-sdk/overview">
+    `standin-sdk`, imported as `standin`. Plugins for ElevenLabs, Deepgram, Cartesia, LiveKit and Hermes, and an echo to test with.
+  </Card>
+  <Card title="TypeScript SDK" icon="js" href="/typescript-sdk/overview">
+    `@komaa/standin-sdk`. Plugins for ElevenLabs, Deepgram, Cartesia, OpenAI Realtime, LiveKit and OpenClaw, and an echo to test with.
+  </Card>
+</CardGroup>
+
+Install the one for your language and start from the quickstart:
+
+<CodeGroup>
+```bash Python
+pip install standin-sdk
+```
+
+```bash TypeScript
+npm install @komaa/standin-sdk
+```
+</CodeGroup>
+
+## Start with your framework
+
+| Your agent | Language | Start with |
+|---|---|---|
+| ElevenLabs | Python or TypeScript | [ElevenLabs Microsoft Teams connector](https://github.com/komaa-com/standin/tree/main/examples/elevenlabs-msteams-connector) |
+| Deepgram | Python or TypeScript | [Deepgram Microsoft Teams connector](https://github.com/komaa-com/standin/tree/main/examples/deepgram-msteams-connector) |
+| Cartesia | Python or TypeScript | [Cartesia Microsoft Teams connector](https://github.com/komaa-com/standin/tree/main/examples/cartesia-msteams-connector) |
+| OpenAI Realtime | TypeScript | [OpenAI Microsoft Teams connector](https://github.com/komaa-com/standin/tree/main/examples/openai-msteams-connector) |
+| LiveKit | Python or TypeScript | [LiveKit Microsoft Teams connector](https://github.com/komaa-com/standin/tree/main/examples/livekit-msteams-connector) |
+| Hermes Agent | Python | [Hermes Microsoft Teams connector](https://github.com/komaa-com/standin/tree/main/examples/hermes-msteams-connector) |
+| OpenClaw | TypeScript | [OpenClaw Microsoft Teams connector](https://github.com/komaa-com/standin/tree/main/examples/openclaw-msteams-connector) |
+| Something else, or your own | Python or TypeScript | [Quickstart](/quickstart), then the echo plugin in your language |
+
+ElevenLabs, Deepgram, Cartesia and OpenAI need nothing beyond the SDK itself: they are reached
+over an ordinary WebSocket, so installing StandIn is installing them.
+
+Not sure yet? Run the [quickstart](/quickstart). It answers a real Microsoft Teams call with an echo, which
+proves your secret, your tunnel and your StandIn identity before any agent is involved.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+  T["Microsoft Teams call"] <--> S["StandIn hosted service"]
+  S <-->|"Authenticated WebSocket: audio, and video when there is any"| W["Your worker: StandIn SDK + plugin"]
+  W <--> A["Your AI agent"]
+```
+
+Two halves, and you run only one of them.
+
+**StandIn is the bridge.** It joins the Microsoft Teams call, handles the media, and dials your worker over
+one authenticated WebSocket per call. There is no media infrastructure for you to stand up.
+
+**Your worker is the brain.** The SDK authenticates that connection and owns the wire protocol,
+audio timing, sequence numbers, capacity, draining and shutdown. Your handler or framework plugin
+connects the call to the agent and its voice provider.
+
+## The seam
+
+A handler implements only the callbacks it needs. A missing one is a no-op, nothing inherits from
+anything, and the session it is handed is how it reaches the call. Here is a whole working plugin.
+
+<CodeGroup>
+```python Python
+from standin import CallServer, CallSession
+
+
+class EchoHandler:
+    async def on_start(self, session: CallSession) -> None:
+        self._call = session
+
+    async def on_caller_audio(self, pcm: bytes) -> None:
+        await self._call.send_audio(pcm)
+
+
+server = CallServer(handler_factory=EchoHandler)
+await server.start()
+```
+
+```typescript TypeScript
+import { CallServer, type CallSession } from "@komaa/standin-sdk";
+
+class EchoHandler {
+  #call!: CallSession;
+  async onStart(session: CallSession) {
+    this.#call = session;
+  }
+  async onCallerAudio(pcm: Buffer) {
+    await this.#call.sendAudio(pcm);
+  }
+}
+
+const server = new CallServer({ handlerFactory: () => new EchoHandler() });
+await server.start();
+```
+</CodeGroup>
+
+That is a real plugin, not a sketch: it answers a live Microsoft Teams call. A handler that wants
+only audio implements only `on_caller_audio` / `onCallerAudio`, and everything else stays out of the
+file.
+
+[Architecture](/concepts/architecture) has the full seam, the two lanes and the wire facts.
+
+## What your agent can do on the call
+
+The echo above is the floor, not the ceiling. Every lane below ships in **both languages** and has a
+page of its own. The cards go to the Python pages; the
+[TypeScript SDK](/typescript-sdk/overview) carries the same set, one for one.
+
+<CardGroup cols={2}>
+  <Card title="Speak and be interrupted" icon="waveform-lines" href="/python-sdk/voice">
+    Realtime speech-to-speech, or `VoiceLane` running your STT, agent and TTS in order with the
+    turn-taking, the pacing and the barge-in already written.
+  </Card>
+  <Card title="See what the caller is showing" icon="eye" href="/python-sdk/vision">
+    The camera and the screen share arrive as frames. The agent can look on demand, and show a chart
+    or a page back on the bot's tile.
+  </Card>
+  <Card title="Wear a face" icon="face-smile" href="/python-sdk/avatar">
+    Send the emotion and the viseme timeline that drives lip-sync. StandIn draws the tile; your
+    worker sends the hints and never has to know how.
+  </Card>
+  <Card title="Behave in a meeting" icon="users" href="/python-sdk/group-calls">
+    Wake phrases, a follow-up window and verbal interrupts, so the agent answers what was addressed
+    to it and stays out of the rest.
+  </Card>
+  <Card title="Do real work mid-call" icon="screwdriver-wrench" href="/python-sdk/call-tools">
+    One set of call tools declared in every provider's own JSON, plus consulting and background work
+    for the jobs too slow to hold a call open.
+  </Card>
+  <Card title="Follow up afterwards" icon="file-lines" href="/python-sdk/minutes">
+    Minutes of the call as a Word-openable document, and a call back to whoever asked for one, once
+    the answer exists.
+  </Card>
+</CardGroup>
+
+Chat is its own lane, with attachments in and pictures out: [Chat](/python-sdk/chat).
+[What the SDK gives you](/concepts/features) is the full inventory, and the boundary that goes with
+it.
+
+## Two lanes
+
+| Lane | Direction | What you expose |
+|---|---|---|
+| Calls | StandIn dials your worker | one WebSocket path, port `9442` by default |
+| Chat | your worker dials StandIn | nothing at all |
+
+The chat lane is dialed **out** from the worker, so Microsoft Teams chat needs no listener, no open port and
+no tunnel, and your agent never holds a Bot Framework credential.
+
+Both lanes authenticate with your connection secret in `STANDIN_SECRET`, and one key covers both.
+The exception is a deployment that issued a **separate chat key**: put it in `STANDIN_CHAT_SECRET`
+and the chat lane prefers it. Set one key when you were given one, two when you were given two.
+[Connection modes](/teams/connection-modes) says which you have.
+
+## Next
+
+<CardGroup cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Answer a real Microsoft Teams call with an echo, in about ten minutes.
+  </Card>
+  <Card title="Microsoft Teams setup" icon="microsoft" href="/teams/overview">
+    The Microsoft side: bot identity, app package, admin consent.
+  </Card>
+  <Card title="Expose your agent" icon="globe" href="/expose">
+    The one path StandIn dials, and how to prove it is reachable.
+  </Card>
+</CardGroup>
+
+<Note>
+StandIn is independent software. It is not affiliated with, endorsed by, or sponsored by Microsoft.
+Microsoft and Microsoft Teams are trademarks of the Microsoft group of companies.
+</Note>

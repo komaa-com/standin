@@ -1,0 +1,172 @@
+---
+title: "Echo plugin"
+description: "The smallest StandIn Python plugin that answers a real Microsoft Teams call, and how to copy it into your own."
+keywords: ["standin-sdk", "teams echo test", "write a standin plugin", "python teams call template"]
+icon: "copy"
+---
+
+`standin.plugins.echo` is the smallest thing that answers a real Microsoft Teams call. It sends the caller's voice back.
+
+That makes it the right thing to run **before** you suspect your own agent: if the echo answers, your secret, your tunnel and your StandIn identity are all correct, and whatever breaks next is yours.
+
+It is also the template. Copy it to start your own plugin.
+
+## Run it
+
+```bash
+pip install standin-sdk
+STANDIN_SECRET=... python -m standin.plugins.echo
+```
+
+It needs no extra and no framework. The base install is all of it.
+
+Expose port `9442` at the `/msteams/calling` path, register the public `wss://` URL as your StandIn identity's agent voice URL, then call the identity and talk. You should hear yourself. The full walkthrough is in the [Quickstart](/python-sdk/quickstart).
+
+## The whole plugin
+
+It is 83 lines across two files: a 75-line `__init__.py` and an eight-line `__main__.py`, which is what makes `python -m standin.plugins.echo` work.
+
+Here is that first file, with the licence header, the module docstring, its `__all__` and the closing `if __name__ == "__main__": main()` trailer elided. Copy the file itself rather than this block if you want `python -m` to work on your copy.
+
+```python
+from __future__ import annotations
+
+import asyncio
+
+from standin import CallServer, CallSession
+
+
+class EchoHandler:
+    """One instance per call. Sends the caller's own voice back to them.
+
+    A handler implements only what it needs: the SDK treats every callback as
+    optional, so this class defines three of the five and the other two are
+    no-ops. Nothing inherits from anything.
+    """
+
+    def __init__(self) -> None:
+        self._call: CallSession | None = None
+
+    async def on_start(self, session: CallSession) -> None:
+        self._call = session
+        print(f"call {session.call_id} from {session.start.caller.display_name or 'unknown'}")
+
+    async def on_caller_audio(self, pcm: bytes) -> None:
+        # Your agent goes here. PCM16, 16 kHz, mono, little-endian - the same
+        # format send_audio expects back.
+        if self._call is not None:
+            await self._call.send_audio(pcm)
+
+    async def on_goodbye(self, text: str) -> None:
+        # StandIn is ending the call and wants this line spoken first. A real
+        # plugin would interrupt the agent and say it.
+        print(f"goodbye: {text}")
+
+
+async def serve() -> None:
+    """Answer Microsoft Teams calls until interrupted."""
+    server = CallServer(handler_factory=EchoHandler)
+    await server.start()
+    try:
+        await asyncio.Event().wait()  # run until cancelled
+    finally:
+        await server.aclose()
+
+
+def main() -> None:
+    try:
+        asyncio.run(serve())
+    except KeyboardInterrupt:
+        pass
+```
+
+Three of the five `CallHandler` methods are defined. `on_context` and `aclose` are absent and that is fine: a missing method is a no-op, because `CallHandler` is a `typing.Protocol` rather than a base class. `on_speaker_change` and `on_video_frame` are separate optional protocols rather than members of that five, so a handler that wants either just defines it. See [The optional callbacks](/python-sdk/call-handler#the-optional-callbacks).
+
+Replace `on_caller_audio` with your framework's agent loop and you have a real plugin. Everything else stays.
+
+## What is doing the work
+
+Almost nothing in this file is about Microsoft Teams, and that is the point. `CallServer` owns the socket StandIn dials, the HMAC handshake and its replay guard, capacity and draining, the wire protocol, outbound sequence numbers and the audio timeline, both watchdogs and teardown. The plugin owns what to do with a voice.
+
+The `asyncio.Event().wait()` is there because `server.start()` returns as soon as the listener is bound. Something has to keep the process alive, and `server.aclose()` in the `finally` is what drains live calls and releases the port on the way out.
+
+## Write your own handler
+
+You do not need the SDK's source, a fork or a registration to write a handler. Copy the class out of
+the block above into your own module, change `on_caller_audio`, and pass it as `handler_factory`:
+
+```python
+from standin import CallServer
+
+server = CallServer(handler_factory=MyHandler)
+await server.start()
+```
+
+There is nothing to declare anywhere. `CallHandler` is a `typing.Protocol`, so your class is a
+handler because it has the right method names, not because it inherits or registers. That is the
+whole seam, and it is the same one every plugin on this site uses. See
+[Call handler](/python-sdk/call-handler).
+
+## Contribute a plugin to the SDK
+
+This part is different: it is for adding a plugin to the `standin-sdk` package itself, so it assumes
+a clone of the repository rather than a `pip install`. If you are building for your own deployment,
+the section above is the one you want.
+
+Every plugin lives inside the one package, so adding one publishes nothing new.
+
+<Steps>
+  <Step title="Copy the directory">
+    ```bash
+    cp -r libraries/python/standin/plugins/echo libraries/python/standin/plugins/<name>
+    ```
+    Your module is now `standin.plugins.<name>`.
+  </Step>
+  <Step title="Declare it">
+    Add `"<name>"` to the `_PLUGINS` tuple in `libraries/python/standin/__init__.py`. That one line
+    is what makes `standin.<name>` resolve, and it is the only registration there is. Nothing is
+    imported at load time, so `import standin` still works on a base install.
+  </Step>
+  <Step title="Add its dependencies as an extra">
+    One extra per plugin in `libraries/python/pyproject.toml`, so the install line reads
+    `pip install "standin-sdk[<name>]"`. Heavy framework dependencies belong there and never in the
+    base: the base install stays `aiohttp` and nothing else.
+  </Step>
+  <Step title="Replace the handler">
+    Keep the shape, change `on_caller_audio`. Add `on_context`, `on_goodbye` and `aclose` when your
+    framework has something to do with them.
+  </Step>
+  <Step title="Check it">
+    ```bash
+    make py-check
+    ```
+    `make ts-check` is its TypeScript counterpart, and `make check` runs both halves plus the
+    protocol and documentation checks. Then open a pull request. `CONTRIBUTING.md` has the workspace
+    commands and the parity requirements for anything that touches the shared SDK.
+  </Step>
+</Steps>
+
+## What to add first
+
+Once the echo answers, three things turn the template into something usable:
+
+**Barge-in.** `await session.cancel_playback()` the moment your provider reports the caller started speaking. Without it the bot keeps talking over the caller for the length of the buffered audio. See [Barge-in](/python-sdk/call-handler#barge-in-and-cancel-playback).
+
+**Frame alignment.** If your provider speaks 24 kHz, resample and align before sending. See [Audio](/python-sdk/audio).
+
+**Cleanup.** Add `aclose(reason)` to close your provider socket. It is always called exactly once, on every path, before the slot is freed.
+
+## Parity
+
+This plugin has a sibling: the TypeScript SDK ships `@komaa/standin-sdk/echo` with the same shape and the same method names in camelCase. Keep them mirrored when you change the seam.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call handler" icon="code" href="/python-sdk/call-handler">
+    All five methods, with a full worked handler.
+  </Card>
+  <Card title="CallServer" icon="server" href="/python-sdk/call-server">
+    Every option you may want to change once calls are real.
+  </Card>
+</CardGroup>

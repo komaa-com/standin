@@ -1,0 +1,118 @@
+---
+title: "Consulting and background work"
+description: "Delegate real work from a live call without stalling it, and keep a promise to deliver later, in the StandIn Python SDK."
+keywords: ["voice agent long running task", "delegate to agent from call", "durable background job", "AI agent callback after call"]
+icon: "hourglass"
+---
+
+A voice model has to answer in under a second or the call sounds broken. Real work does not fit in a second.
+
+Looking something up, reading a file, driving a browser, running a skill: those take ten seconds, or five minutes. A caller listening to silence cannot tell thinking from crashed.
+
+So an agent that does real work is two agents. The fast one talks. The slow one works. This is the seam between them, and it is the same whichever provider does the talking and whichever framework does the working.
+
+## Hold on, let me check
+
+`Consultant` runs the slow agent inside a live call. You supply a factory; what it builds is yours.
+
+```python
+from standin import Consultant
+
+consultant = Consultant(lambda: my_agent.run, timeout_s=45)
+answer = await consultant.ask("what did we bill Contoso last quarter?")
+```
+
+`timeout_s` defaults to `DEFAULT_CONSULT_TIMEOUT_S`, 45 seconds: how long a caller will wait on the line before "let me check" stops sounding like thinking and starts sounding like a dropped call.
+
+Three behaviours are not obvious, and each exists because a caller is listening.
+
+**A blocking agent runs off the loop.** A synchronous callable goes to a thread. Called inline it would hold the event loop for its whole duration, and the caller would hear the call itself stall.
+
+**One at a time, and the second asker is told so.** A model that can delegate can delegate twice before the first answer lands. Queueing the second means it waits out both timeouts and answers far too late, so it is refused immediately with a sentence the model can say out loud. `consultant.busy` is that state, if your plugin would rather not offer the tool while one is running.
+
+**A timeout is admitted.** The work cannot be cancelled: the thread runs to its end whatever this returns. The answer says it stopped rather than promising a follow-up nothing will send, and the timed-out agent is dropped so the next question builds a fresh one.
+
+<Note>
+  `ask` never raises. It always returns something speakable, because an exception in a tool result is an agent that goes quiet mid-sentence.
+</Note>
+
+## I'll send you the result
+
+When the work will not finish while somebody waits, it becomes a promise, and a promise made on a call that is about to end has to outlive the process that made it.
+
+`BackgroundTasks` writes each task to disk **before** the work starts and removes it only once the result has actually been delivered.
+
+```python
+from standin import BackgroundTasks
+
+tasks = BackgroundTasks()
+
+# during the call
+task = tasks.remember(query, thread_id=session.start.thread_id)
+tasks.begin(task)
+...
+tasks.done(task)
+
+# once, at worker startup
+await tasks.resume(lambda: my_agent.run, deliver=post_to_chat)
+```
+
+`remember` returns the `BackgroundTask` it wrote, or `None` when it could not be written, which is a task that runs but will not survive a restart. That is worth knowing about and worth continuing with: a non-durable answer still beats no answer.
+
+`resume` returns how many tasks it actually delivered, and its `timeout_s` is what each recovered run gets. `BackgroundTasks(directory=..., ttl_s=..., resume_limit=...)` takes all three. The directory defaults to a `tasks` folder under `STANDIN_STATE_DIR`, or under `~/.standin/state` when that is unset, created owner-only. Deliberately never a temp directory: a temp directory passes every test and loses every parked promise on the next reboot, which is invisible until somebody is waiting for an answer that no longer exists.
+
+| Field | What it is |
+|---|---|
+| `task_id` | The promise's own id, and the name of its file. |
+| `query` | What was asked. |
+| `thread_id` | Where the result goes. A task with none is written, and then dropped loudly the next time `resume` looks, because there is nowhere to send what it produces. |
+| `session_key` | Which agent session it belongs to, when a framework has one. |
+| `created_ms` | When the promise was made, which is what the expiry is measured against. |
+| `claim_path` | Set only on a claimed task, so `finish` can put it **back** on the queue when the delivery fails rather than losing the promise. |
+
+The two-phase claim is what makes a restart safe. A task waiting to run is a `.json`; a task being run is a `.claimed`. A process that dies mid-run leaves a claim behind, and the next startup takes it back once it is old enough to be sure nobody is still working on it. A delivery that fails puts the task back rather than dropping it.
+
+A promise that outlives the call needs a stated lifetime, so here are the numbers.
+
+| Guard | Value | Why |
+|---|---|---|
+| `DEFAULT_TASK_TTL_S` | 7200, two hours | An answer long after the question is worse than no answer. |
+| `DEFAULT_RESUME_LIMIT` | 5 tasks per startup | A restart storm must not fan out one agent per promise across the fleet. What is left stays queued, never discarded. |
+| `DEFAULT_TASK_TIMEOUT_S` | 300 | What `resume` gives one recovered task's run. Far longer than a consultation, because nobody is listening to it. |
+| No thread, no task | | A task with nowhere to deliver cannot be kept, so it is dropped loudly at startup rather than run for nothing. |
+| Ten minute claim window | | Taking a claim somebody is still working on delivers the same answer twice. |
+
+Those four constants are not on the `standin` barrel. Reach them as
+`from standin.consult import DEFAULT_CONSULT_TIMEOUT_S, DEFAULT_TASK_TIMEOUT_S, DEFAULT_TASK_TTL_S, DEFAULT_RESUME_LIMIT`. The TypeScript twin exports all four from the package root, and the three that are durations are named for milliseconds there: `DEFAULT_CONSULT_TIMEOUT_MS`, `DEFAULT_TASK_TIMEOUT_MS`, `DEFAULT_TASK_TTL_MS`. `DEFAULT_RESUME_LIMIT` is a count and keeps its name.
+
+## The two tools
+
+Both are `ToolSpec` values, ready to register on `CallTools`. They are not built in, because an agent with no second agent behind it should not be told it has one.
+
+```python
+from standin import BACKGROUND_TASK_TOOL, CONSULT_TOOL
+
+tools.register(CONSULT_TOOL, lambda params: consultant.ask(params.get("query", "")))
+tools.register(BACKGROUND_TASK_TOOL, start_background_task)
+```
+
+Their descriptions are deliberately distinguishable. Without that, a model picks whichever comes first and every long job is run while somebody waits on the line.
+
+Once the background tool is registered, pass `background_available=True` to `Consultant` and a timeout will point the caller at it. Leave it off and it will not, because promising a path that does not exist is worse than admitting the work stopped.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call tools" icon="wrench" href="/python-sdk/call-tools">
+    Where both tools are registered, beside the built-ins.
+  </Card>
+  <Card title="Meeting recap" icon="file-lines" href="/python-sdk/minutes">
+    The other job a `Consultant` is normally handed.
+  </Card>
+  <Card title="Reaching people" icon="phone-volume" href="/python-sdk/reaching-people">
+    When the answer should ring somebody back rather than land in a chat.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/python-sdk/configuration">
+    `STANDIN_STATE_DIR` and every other variable the SDK reads.
+  </Card>
+</CardGroup>

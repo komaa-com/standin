@@ -1,0 +1,215 @@
+---
+title: "LiveKit plugin"
+description: "Answer Microsoft Teams calls with a LiveKit Agent using standin-sdk[livekit]: two lines, CallInfo, and the two data topics."
+keywords: ["LiveKit Microsoft Teams agent", "standin-sdk[livekit]", "CallInfo msteams", "livekit agent dispatch Microsoft Teams"]
+icon: "tower-broadcast"
+---
+
+`standin-sdk[livekit]` answers Microsoft Teams calls with a [LiveKit Agent](https://docs.livekit.io/agents/).
+
+StandIn answers the Microsoft Teams call and dials your worker. This plugin answers that dial, creates one LiveKit room per call, dispatches your own agent into it, and relays the audio both ways. By the time your entrypoint runs, the call is an ordinary LiveKit room: the caller's voice is a room track like any other participant's, so the session needs no special audio wiring.
+
+## Install
+
+In your worker's Python environment:
+
+```bash
+pip install "standin-sdk[livekit]"
+```
+
+The extra pulls in `livekit-agents`. The example adds the model and VAD plugins it uses:
+
+```bash
+pip install "standin-sdk[livekit]" "livekit-agents[openai,silero]"
+```
+
+Python 3.10 or newer, and `livekit-agents` 1.6.10 or newer.
+
+## The two StandIn-specific lines
+
+Out of a whole agent file, two lines are new:
+
+```python
+from standin.plugins import livekit as standin
+...
+call = await standin.TeamsCall().start(session, ctx=ctx)
+```
+
+Everything else is the shape every LiveKit agent example already has.
+
+```python
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli
+from livekit.plugins import openai
+from standin.plugins import livekit as standin
+
+
+class MyAgent(Agent):
+    def __init__(self, call: standin.CallInfo) -> None:
+        super().__init__(
+            instructions=f"You are on a Microsoft Teams call with {call.caller_name}.",
+        )
+
+
+server = AgentServer()
+
+
+@server.rtc_session(agent_name="standin-msteams")
+async def entrypoint(ctx: JobContext):
+    session = AgentSession(llm=openai.realtime.RealtimeModel())
+    call = await standin.TeamsCall().start(session, ctx=ctx)
+    await session.start(agent=MyAgent(call), room=ctx.room)
+
+
+if __name__ == "__main__":
+    cli.run_app(server)
+```
+
+**Importing the plugin arms it. Setting `STANDIN_SECRET` starts it.** A worker without that variable behaves exactly as if the plugin were not installed, so the same file can keep serving your web and SIP rooms unchanged.
+
+There is no bootstrap call. Importing registers the plugin with the worker, the same import-time registration every LiveKit plugin performs, and the call listener starts on the worker's own `worker_started` event: once, in the main process, with the loop already running.
+
+Why a listener at all: StandIn dials the worker per call, and no job exists until that dial has been answered and an agent dispatched. So the listener cannot live inside the entrypoint. It lives inside the worker's lifecycle instead, where you never see it.
+
+## Configuration
+
+Environment, unless you construct the handler yourself: see [Advanced](#advanced-constructing-the-handler-yourself).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STANDIN_SECRET` | *(required)* | Connection secret from the StandIn portal. Arms the plugin. |
+| `STANDIN_PORT` | `9442` | Port the call listener binds. |
+| `STANDIN_HOST` | `0.0.0.0` | Bind address. Use `127.0.0.1` when only a local tunnel should reach it. |
+| `STANDIN_WS_PATH` | `/msteams/calling` | Path StandIn dials. |
+| `LIVEKIT_URL` | *(required)* | Your LiveKit project. The worker already has these three. |
+| `LIVEKIT_API_KEY` | *(required)* | |
+| `LIVEKIT_API_SECRET` | *(required)* | Never logged, never sent to StandIn. |
+| `LIVEKIT_AGENT_NAME` | *(unset)* | Fallback for the name the worker registered with. The registered name wins whenever it can be read; see [Dispatch](#dispatch). |
+| `LIVEKIT_TILE_VIDEO` | `auto` | Relay your agent's own video onto the bot's tile. See [The avatar tile](#the-avatar-tile). |
+| `LIVEKIT_TILE_VIDEO_FPS` | `12` | Frames per second for that relay. Clamped to `MAX_TILE_FPS`, which is 20. A value that is not a whole number above zero is refused, naming the variable. |
+
+A missing LiveKit variable is caught at **startup**, with one clear log line, rather than on the first real call with a caller already on the line. A misconfigured plugin logs why it is not answering calls and lets the worker run; it never takes the worker down.
+
+Then expose port `9442` at the `/msteams/calling` path and register the public `wss://` URL as your StandIn identity's agent voice URL. [Expose your agent](/expose) carries the mount command and the probes, and it is the only page that does: three spellings of one URL across three pages is what caused a live incident here.
+
+## What you get in the entrypoint
+
+`TeamsCall().start(session, ctx=ctx)` returns a `CallInfo` and wires two data topics onto your session.
+
+| Topic | Carries |
+|---|---|
+| `msteams.context` | Non-interrupting context: participant counts and group-call etiquette, DTMF digits, recording status. Logged by default; pass `on_context=` to handle it. |
+| `msteams.goodbye` | The line StandIn wants spoken before it ends the call. The default handler interrupts the current turn and says it, which is what you want: teardown follows within seconds. |
+
+Both topics carry `{"text": ...}`, and the plugin's handler is the only publisher. The names are exported as `standin.TOPIC_CONTEXT` and `standin.TOPIC_GOODBYE`.
+
+```python
+def note_context(text: str) -> None:
+    log.info("Microsoft Teams context: %s", text)
+
+
+call = await standin.TeamsCall(on_context=note_context).start(session, ctx=ctx)
+```
+
+`on_goodbye=` is the matching hook for the other topic, and it **replaces** the default rather than running beside it: pass one and the interrupt-then-speak behaviour above is yours to reproduce. Leave it unset unless the closing line needs to go somewhere other than the caller's ear.
+
+Both callbacks may be plain function or coroutine, and both run as the packet arrives rather than being awaited by anything. A handler that raises is logged and the call carries on, which is the right trade for a topic that is advisory: losing one context line must not end a call.
+
+Context is queued until the agent is actually bound to the room, then published. The SDK itself does not queue, and that is right: what "ready" means is a framework's own business. For LiveKit it means something specific, because a data packet reaches only the participants connected at that instant, and the first `participants` message arrives seconds before the dispatched agent joins.
+
+The goodbye is not queued. The SDK has already told StandIn to drop the agent's buffered audio and teardown follows in seconds, so a goodbye with no agent to hear it was never going to be spoken.
+
+`start()` reads the caller off `ctx` and attaches the topic listener to `ctx.room`. Pass `room=` as well when the room you want the listener on is not `ctx.room`; it overrides the target and nothing else, so `ctx` is still what says who is calling. The record `start()` returned is also kept on the `TeamsCall` itself as `.info`, so a helper handed the object does not need the return value threaded to it.
+
+## CallInfo
+
+```python
+info = standin.CallInfo.from_job(ctx)
+if info.is_teams_call:
+    call = await standin.TeamsCall().start(session, ctx=ctx)
+```
+
+| Field | Meaning |
+|---|---|
+| `caller_name` | The caller's Microsoft Teams display name, or `"caller"`. |
+| `tenant_id` | The caller's Microsoft tenant. |
+| `call_id` | StandIn's id for this call. |
+| `thread_id` | The Microsoft Teams thread. A meeting or channel conversation begins `19:`. |
+| `user_id` | The caller's AAD object id. |
+| `direction` | `inbound` or `outbound`. |
+| `is_teams_call` | False when this job was dispatched by something other than the StandIn plugin. |
+
+`CallInfo.from_job` never raises. A job dispatched by anything else has no metadata, or metadata in someone else's shape, and both read as "not a Microsoft Teams call" rather than taking the worker down. It looks in three places in order, the job's own metadata, the job's room snapshot and `ctx.room`, so it finds the record on the automatic-dispatch path too, including before `ctx.room` has connected.
+
+`TeamsCall().start()` is the half that **does** raise. Handed a job this plugin did not dispatch it raises `StandInError` rather than attaching to a call that is not there, and it raises again if neither `ctx=` nor `room=` gives it a room. That is why the `is_teams_call` check above is a guard and not a nicety: in a worker that also serves web or SIP rooms, calling `start()` unguarded turns every non-Teams job into a failed entrypoint.
+
+<Warning>
+`user_id` is **empty for guest and anonymous callers**, in both SDKs. Never use it as a bare key for per-caller memory without checking it first, or two anonymous callers share one identity.
+</Warning>
+
+<Note>
+**The two SDKs fill an unknown field differently, and an agent that reads the raw metadata will see it.** This plugin always writes `caller_name`, `tenant_id` and `thread_id`, substituting `"caller"` and `"unknown-tenant"` when StandIn does not know them, which is what the table above describes. The TypeScript plugin omits an empty field instead, so the same key is simply absent there. Reading through `CallInfo` hides the difference; reading `job.metadata` yourself does not.
+</Note>
+
+## Dispatch
+
+With `agent_name=` set in `@server.rtc_session(...)`, the plugin dispatches explicitly, which is the recommended setup. Without it, the plugin relies on automatic dispatch, where creating the room is itself what assigns the job. It logs which mode it is in at startup.
+
+The name is read off the worker rather than configured twice, and it is resolved at `worker_started` rather than earlier, so the framework's own precedence applies and the plugin cannot disagree with the worker about who it is. Two copies of a string that must match is how you get a room that is created, a job that never arrives, and a caller who hears silence.
+
+Either way the plugin attaches the same call metadata to the room as it is created, so `CallInfo` reads it even on the automatic path, where jobs carry no dispatch metadata.
+
+## Rooms
+
+Room names are `{prefix}{callId}`, defaulting to `msteams-`, with the `callId` reduced to a conservative charset and the whole name capped at 100 characters. That derivation is a contract rather than a detail, so a room created for a given call is the same room whichever shipped plugin created it, and both SDKs compute it identically.
+
+The prefix itself is configurable, and this is one of the few places the two SDKs differ in how: here it is the `room_prefix` argument on `TeamsCallHandler`, and in the TypeScript plugin it is the `LIVEKIT_ROOM_PREFIX` environment variable. Change it in one worker and the room a call lands in is no longer the room the other worker would have made, which is the point of writing the contract down.
+
+At teardown the plugin disconnects and deletes the room, so the agent job ends at once instead of idling out: a job whose room still exists sits there until LiveKit's own empty-room timeout, which is minutes of a worker slot doing nothing. If the delete fails it logs and lets the room idle out rather than failing the call. Turning it off is `delete_room_on_end=False` here, and `LIVEKIT_DELETE_ROOM=off` in the TypeScript plugin.
+
+## Draining and shutdown
+
+The plugin hooks the LiveKit worker's own drain: when the worker starts draining, the call listener stops accepting new dials while live calls continue. A draining worker must not answer a dial it will never dispatch, and the default LiveKit drain window is an hour.
+
+On shutdown it closes the listener before the worker finishes, cancelling a slow start first so a shutdown racing a start cannot bind the port after cleanup.
+
+## The avatar tile
+
+If your agent publishes video of its own, an avatar worker or a rendered face, it is relayed onto the bot's video tile automatically and **on by default**. The caller sees your agent rather than StandIn's own avatar. When it does not, `express` and `send_speech_marks` still drive StandIn's avatar, which [The avatar](/python-sdk/avatar) covers.
+
+`LIVEKIT_TILE_VIDEO` takes three kinds of value, and the third is the one worth knowing about:
+
+| Value | What happens |
+|---|---|
+| unset or `auto` | Relay whichever participant's video the room offers. |
+| `off` | No relay. The caller sees StandIn's avatar. |
+| anything else | A participant **identity** to pin the relay to. |
+
+Pin an identity when a separate worker publishes the avatar and LiveKit's publish-on-behalf attribute is not set: without a name the relay takes whichever participant published first, which on a busy room is the wrong one. With the attribute set there is nothing to pin, because that is the first thing the plugin looks at, falling back to the agent's own identity.
+
+Tracks are matched by kind, never by source. An avatar worker publishes untagged video, so a source filter would pick the right participant and then stream nothing, which is the most expensive way to get this wrong.
+
+Frames are paced, latest-wins, and dropped rather than queued when the socket is congested, because both streams share one socket and a caller forgives a dropped frame far more readily than a break in the voice. `LIVEKIT_TILE_VIDEO_FPS` defaults to 12 and is clamped to `MAX_TILE_FPS`, which is 20: a talking head gains nothing above that, and a higher rate only spends local CPU on encoding. A value that is not a whole number above zero is refused, naming the variable: an operator who typed `twelve` is looking at a setting that is not the one in force, and silence is what makes that take an afternoon to find.
+
+Encoding needs the `tile` extra: `pip install "standin-sdk[tile]"`. Without it the relay stays off with one line in the log and **the call is unaffected**: the caller hears your agent and sees StandIn's rendered avatar, which is what they would have seen anyway.
+
+## Advanced: constructing the handler yourself
+
+`TeamsCallHandler` is exported for embedding without an `AgentServer`. It takes `agent_name`, the three `livekit_*` credentials, `room_prefix`, `delete_room_on_end`, `tile_video` and `tile_video_fps`. The last two are the constructor forms of the tile variables above, so a worker built this way sets them in code rather than in the environment. Normal workers never construct it: the plugin's own factory does.
+
+## Full example
+
+[`examples/livekit-msteams-connector`](https://github.com/komaa-com/standin/tree/main/examples/livekit-msteams-connector) is a complete, runnable worker with the `.env` layout, the tunnel command and the agent file.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call handler" icon="code" href="/python-sdk/call-handler">
+    What the plugin implements on your behalf.
+  </Card>
+  <Card title="Echo plugin" icon="copy" href="/python-sdk/plugins/echo">
+    The template for a framework the SDK has no plugin for.
+  </Card>
+  <Card title="The avatar" icon="face-smile" href="/python-sdk/avatar">
+    The rest of the avatar surface: expression, visemes and your own frames on the tile.
+  </Card>
+</CardGroup>

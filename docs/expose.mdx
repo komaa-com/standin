@@ -1,0 +1,196 @@
+---
+title: "Expose your agent"
+description: "StandIn dials your worker from the internet. The one path to publish, the mount commands, and the probes that tell a real fault from a fake one."
+keywords: ["expose agent StandIn","Tailscale Funnel set-path","msteams/calling","port 9442","ngrok cloudflared devtunnel","funnel 401 404","curl http1.1 websocket"]
+---
+
+StandIn is hosted, so it reaches your worker **from the internet**. The call lane is the only thing
+you publish, and getting its path or its target wrong produces the same symptom: a call that never
+connects a bot, with nothing in your logs.
+
+This is the only page that carries the mount commands. Every other page links here.
+
+## What you publish
+
+| Public path | Lane | Local target |
+|---|---|---|
+| `/msteams/calling` | calls, a WebSocket, one connection per call | `127.0.0.1:9442`, path `/msteams/calling` |
+| `/msteams/calling/outcome/{callId}` | call outcomes, an HTTP `POST`, **only when your worker asks for it** | `127.0.0.1:9442`, same path prefix |
+
+The WebSocket is the only thing that has to be publicly reachable. StandIn dials
+`/msteams/calling/{callId}`, appending the call id itself. Both defaults are overridable with
+`STANDIN_PORT` and `STANDIN_WS_PATH`, but change them only if something else already owns the port:
+one URL shape across every worker is worth more than a tidier path.
+
+The second row needs no second mount. It sits under the same prefix, so a **path** mount already
+forwards it, and a whole-port mount does too. It exists only when your worker registers an outcome
+callback, `on_call_outcome` / `onCallOutcome`, which is how a worker that **places** calls hears
+that nobody answered instead of waiting out the ring. Register nothing and a `POST` there is a
+`404`, so a worker that only answers calls opens no extra surface. It is signed like everything
+else: a bad or stale signature is `401`, a body over the cap is `413`, and a good one is `204`.
+Outbound calling is covered in Reaching people ([Python](/python-sdk/reaching-people),
+[TypeScript](/typescript-sdk/reaching-people)).
+
+Two things are not on the list, for two different reasons. `GET /healthz` sits at the **root** of
+the call port rather than under the call path, so a path mount does not carry it, which is the
+point: it is a local check (see [Probe it by hand](#probe-it-by-hand)). A whole-port tunnel does
+carry it, along with everything else on that port, which is one more reason to prefer a path mount.
+And placing an outbound call is your worker dialling **out** to the StandIn address in
+`STANDIN_WORKER_URL`, so there is nothing inbound to publish for it.
+
+<Note>
+**The chat lane needs no mount.** `ChatChannel` dials **out** from your worker to StandIn, so there
+is no listener, no port and no tunnel rule for chat, and your agent holds no Bot Framework
+credential. If you are looking for a chat mount to create, you are looking for something that does
+not exist any more. See [Architecture](/concepts/architecture#two-lanes).
+</Note>
+
+<Warning>
+**Bring-your-own-bot chat is a different thing again.** On a BYO-bot identity, Microsoft Teams chat is served
+by your runtime's own Microsoft Teams channel (OpenClaw's `msteams` channel, the Hermes gateway's Microsoft Teams
+platform) on `127.0.0.1:3978` at `/api/messages`, and that endpoint is not part of this SDK. If you
+run it, publish it the same way as the call path and register it on your connection. If you do not,
+skip it: calls work normally without it.
+</Warning>
+
+## Mount the call path
+
+With Tailscale Funnel, map the **path** onto your one public host. The proxy target must **repeat
+the path**, or the request arrives at your worker stripped and 404s:
+
+```bash
+tailscale funnel --bg --set-path=/msteams/calling http://127.0.0.1:9442/msteams/calling
+```
+
+Set `STANDIN_HOST=127.0.0.1` in the worker so the listener is reachable only through the funnel.
+The SDK's own default is `0.0.0.0`, which suits a container behind an ingress and is too open for a
+laptop.
+
+<Warning>
+**Do not mount a whole port.** `tailscale funnel --bg --https=8443 9442` publishes every route on
+that port, burns one of the three funnel slots (443, 8443, 10000), and puts a port in the URL you
+then have to type correctly everywhere. A path mount gives you a portless URL.
+</Warning>
+
+Confirm it before you register anything:
+
+```
+$ tailscale funnel status
+https://<machine>.<tailnet>.ts.net (Funnel on)
+|-- /msteams/calling proxy http://127.0.0.1:9442/msteams/calling
+```
+
+<Warning>
+**A registered mount is not a working mount.** `tailscale funnel --bg` returns as soon as the rule
+exists, whether or not anything listens behind it. Its exit status proves nothing. Probe the path
+before you conclude the worker is exposed.
+</Warning>
+
+### Other tunnels
+
+ngrok, cloudflared and devtunnel forward a **whole local port** rather than a path:
+
+<CodeGroup>
+```bash ngrok
+ngrok http 9442      # -> https://<id>.ngrok.app/msteams/calling
+```
+
+```bash cloudflared
+cloudflared tunnel --url http://localhost:9442
+```
+
+```bash devtunnel
+devtunnel host -p 9442 --allow-anonymous
+```
+</CodeGroup>
+
+The path is preserved either way, so the public URL is still the host plus `/msteams/calling`.
+
+### Behind an ingress
+
+In a cluster, point an ingress rule at the worker's service on `9442` and leave `STANDIN_HOST` at
+its `0.0.0.0` default. The ingress must allow WebSocket upgrades and must not strip the path. Read
+timeouts need to outlast a call, not a request: a long silence in a conversation is normal, and an
+idle timeout below your longest expected pause will cut live calls.
+
+Check the message size limit too. The listener accepts a single inbound WebSocket message of up to
+**2 MB**, and what crosses that socket is wildly uneven: one audio frame is under a kilobyte, while
+one frame of the caller's camera or screen share is orders of magnitude larger. A proxy that caps a
+message below 2 MB therefore breaks video on a call whose audio keeps working perfectly, and that is
+a hard symptom to attribute to the proxy.
+
+## What you register in StandIn
+
+One field on your connection in the [dashboard](https://standin.komaa.com/dashboard):
+
+| Field | Value |
+|---|---|
+| **Agent calling URL** (agent voice URL) | `wss://<machine>.<tailnet>.ts.net/msteams/calling` |
+
+Paste a bare host and StandIn appends the default path. Paste a full URL and it is respected as
+given. With a path mount there is no port in the value.
+
+<Note>
+**StandIn's own endpoints are a separate layer.** The `https://<identity>.standin.komaa.com/api/calling`
+address you point your **Azure Bot** at is hosted by StandIn and is unaffected by anything on this
+page. That one goes in the Azure portal ([Create the Azure bot](/teams/azure-bot)); the one above
+goes in the StandIn dashboard.
+</Note>
+
+## Probe it by hand
+
+<Warning>
+**Always pass `--http1.1` when probing through a funnel.** Tailscale Funnel serves HTTP/2, which has
+no connection-level upgrade, so over h2 your `Connection: Upgrade` and `Upgrade: websocket` headers
+never travel as a handshake: what reaches the worker is an ordinary `GET`. A TypeScript worker
+answers that **404**, identical to a missing mount, and a Python worker answers **401**, because it
+checks the signature before it looks at the upgrade. Either way the answer is about your probe, not
+about your mount. People have chased that phantom for hours.
+</Warning>
+
+```bash
+curl -si --http1.1 \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  https://<your-host>/msteams/calling/probe | head -1
+```
+
+The trailing `/probe` stands in for a call id. The probe carries no signature, so it can never open
+a session: you are asking the route to prove it exists, not to let you in.
+
+| You get | Means |
+|---|---|
+| `401` | **Alive.** The mount works and the handshake rejected an unsigned probe, which is correct. Both SDKs answer this to a real upgrade with no signature. |
+| `404` | Nothing is mounted at that path, the mount target dropped the path, or the tunnel's own edge never forwarded the request. Rule out a missing `--http1.1` first: without it a TypeScript worker answers `404` to a probe it was perfectly happy to serve. |
+| `503` | **Also alive**, and refusing on purpose: the worker is draining, or every call slot is taken. Both are checked before the signature, so a real upgrade meets them before it meets the handshake. Nothing about the mount is wrong. |
+| connection refused, curl exit 7 | The mount exists but nothing is listening locally, or the bind address is wrong. |
+| timeout | The tunnel is up but the target is unreachable from it. |
+
+Run the same probe against `http://127.0.0.1:9442/msteams/calling/probe` to tell "the tunnel is
+wrong" from "nothing is listening".
+
+For a plain liveness check the SDK also serves `GET /healthz` at the **root of the call port**. A
+path-scoped funnel mount does not publish it, which is deliberate: it is a local check, so run it
+against `127.0.0.1`.
+
+```bash
+curl -s http://127.0.0.1:9442/healthz
+# {"ok": true, "calls": 0}
+```
+
+The `calls` count is the number of live sessions, which is also how you watch a drain finish.
+
+<Warning>
+**A plain `GET` on the call path is not a health check.** A healthy worker on loopback, with no
+tunnel involved, answers it `401` in Python and `404` in TypeScript, and neither is a liveness
+signal: the Python listener is refusing an unsigned request, and the TypeScript listener is saying
+that nothing but an upgrade belongs there. Use `/healthz` for liveness and the upgrade probe above
+for routing, and never write a check around the call path's status code.
+</Warning>
+
+## Legacy standalone bridges
+
+The older standalone bridges published a second inbound chat lane, so they needed a second mount.
+This SDK does not: its chat lane is dialled **out** by `ChatChannel`, so there is no listener, no
+port and no tunnel rule for chat. See the chat lane ([Python](/python-sdk/chat),
+[TypeScript](/typescript-sdk/chat)).

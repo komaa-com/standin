@@ -1,0 +1,352 @@
+---
+title: "Sending a picture"
+description: "Attach a checked image to a chat reply, and turn a MEDIA: marker into bytes worth sending, in the StandIn TypeScript SDK."
+keywords: ["MEDIA marker", "outboundImage", "parseMedia", "loadMedia", "STANDIN_MEDIA_ROOTS", "send an image from a Microsoft Teams bot"]
+icon: "image"
+---
+
+A picture your agent sends travels as **bytes**, never as a link. The reason is worth stating once,
+because every shortcut here leads back to it: a link in a chat message is a beacon. An off-domain
+image loads with no click, under your bot's name, it reports back who opened the conversation and
+when, and whatever it serves can be swapped after everyone has looked at it. Bytes cannot do any of
+that, and bytes can be checked before they leave.
+
+So there is exactly one way to build a picture this SDK will send, and that one way does the checking.
+
+<Note>
+This page is about pictures your agent **sends**. Putting a picture on the bot's video tile during a
+call is a different lane with different limits: see [Vision and the avatar](/typescript-sdk/vision).
+</Note>
+
+## `outboundImage`
+
+```ts
+import { outboundImage } from "@komaa/standin-sdk";
+
+const picture = outboundImage(pngBytes, "image/png", "q3-revenue.png");
+```
+
+It takes a `Buffer` or an already-base64 `string`, a declared content type, and an optional filename.
+It returns an `OutboundImage`, which is the only shape the chat lane will carry:
+
+```ts
+interface OutboundImage {
+  readonly contentType: string;
+  readonly contentBase64: string;
+  readonly name?: string;
+}
+```
+
+It throws rather than returning something half-checked, and it runs its checks in this order:
+
+1. **The declared type is on the allowlist.** `image/jpg` is folded to `image/jpeg` first, because that
+   spelling is common and is not a media type. Anything else throws naming the four that work.
+2. **The bytes are within the cap.** Checked on the decoded length, so a base64 string that expands
+   past the limit is refused.
+3. **The bytes carry the signature of the type they claim.** A declared type is a claim made by
+   whatever produced the bytes. The signature is what they are. Without this check an HTML document
+   or an SVG labelled `image/png` is posted into somebody's chat under your bot's name.
+4. **The filename is sanitized**, which never throws: a name that cannot be made safe is simply dropped.
+
+Step 3 is the one that matters, and it is strict in both directions: the sniffed type must **equal**
+the declared type. A GIF labelled `image/png` is refused, not quietly relabelled. If you do not know
+what you are holding, sniff first and pass the answer back in, which is exactly what `loadMedia` does
+below.
+
+That check is also the only thing standing behind a base64 `string`, because
+`Buffer.from(data, "base64")` is lenient: Node discards characters that are not base64 rather than
+objecting, so a truncated or scrambled string decodes quietly to fewer bytes and arrives at step 3 as
+the wrong bytes. The Python SDK decodes strictly and raises on that same input, so do not port a test
+that expects the decode itself to do the rejecting.
+
+<Note>
+Every refusal on this page, from `outboundImage` and `loadMedia` alike, is a plain `Error` rather than
+a `StandInError`, so an `instanceof StandInError` filter will not catch one. Catch `Error` and read
+`err.message`: the messages are written to be handed straight back to whatever chose the bytes. The
+Python twin raises `ValueError` on the same paths.
+</Note>
+
+## What may be sent
+
+| | Chat reply | On the call tile |
+|---|---|---|
+| Constant | `OUTBOUND_IMAGE_CONTENT_TYPES` | `DISPLAY_IMAGE_MIME_TYPES` |
+| Types | `image/png`, `image/jpeg`, `image/gif`, `image/webp` | `image/jpeg`, `image/png` |
+| Cap | `OUTBOUND_IMAGE_MAX_BYTES`, `1024 * 1024` bytes | `MAX_IMAGE_BYTES`, `1400000` bytes |
+
+Every constant in that table is importable from the barrel, so a check of your own can use the same
+number the SDK does rather than a copy that drifts:
+
+```ts
+import {
+  OUTBOUND_IMAGE_CONTENT_TYPES,
+  OUTBOUND_IMAGE_MAX_BYTES,
+} from "@komaa/standin-sdk";
+```
+
+<Warning>
+`image/svg+xml` is absent from the chat list deliberately, and it is not a gap to fill later. SVG is
+scriptable XML, which is precisely what "an image" must not be when it renders inside somebody else's
+client under your bot's identity.
+</Warning>
+
+## `sniffImageType`
+
+```ts
+import { sniffImageType } from "@komaa/standin-sdk";
+
+const actual = sniffImageType(bytes);
+// string | undefined: "image/png", "image/jpeg", "image/gif" or "image/webp"
+```
+
+It reads the leading bytes and returns what they actually are, or `undefined` when they are none of
+the four. WebP gets a second look: a `RIFF` header is only a WebP when bytes 8 to 11 say `WEBP`, and
+a RIFF container that holds audio would otherwise sail through on its first four bytes.
+
+Use it whenever the type you have came from somewhere you do not control: a `Content-Type` header, a
+file extension, or a field a model filled in. All three are claims.
+
+## `sanitizeImageName`
+
+```ts
+import { sanitizeImageName } from "@komaa/standin-sdk";
+
+sanitizeImageName("../../etc/passwd"); // "passwd"
+sanitizeImageName("report:final?.png"); // "reportfinal.png"
+sanitizeImageName(".."); // undefined
+```
+
+A filename reaches a chat as a **download**, and the model that chose it is being steered by whoever
+is in the conversation. So the name is reduced to one path-free segment: backslashes are folded to
+forward slashes and only the last segment survives, every character below a space is dropped along
+with `<>:"|?*`, and what is left is trimmed. An empty result, `.` or `..` returns `undefined`, which
+means the picture is sent with no name rather than with a dangerous one.
+
+Names longer than 200 characters are truncated, keeping the extension so the file still opens with
+the right application. `outboundImage` calls this for you, and it returns `undefined` rather than
+throwing, because a bad filename is never a reason to drop an answer.
+
+## Getting the picture into a reply
+
+Two paths, and they differ in how many messages the person sees.
+
+**One message carrying both.** `buildReply` takes the image as its fourth argument, after the kind:
+
+```ts
+import { buildReply, outboundImage, parseInbound } from "@komaa/standin-sdk";
+
+const message = parseInbound(rawBody);
+const picture = outboundImage(pngBytes, "image/png", "q3-revenue.png");
+const reply = buildReply(message, "Here is Q3.", "message", picture);
+```
+
+This is the path when you relay messages yourself rather than through `ChatChannel`. A `typing` reply
+carries neither text nor image: it is a state, not a message.
+
+**A second message from inside a handler.** `ChatChannel`'s own reply path posts the string your
+`respond` returns, and that string carries no picture. `chat.send()` is how you post one:
+
+```ts
+import { ChatChannel, outboundImage } from "@komaa/standin-sdk";
+
+const chat: ChatChannel = new ChatChannel({
+  respond: async (message) => {
+    const { words, chart } = await agent.ask(message.text);
+    if (chart !== undefined) {
+      await chat.send({
+        tenantId: message.tenantId,
+        conversationId: message.conversationId,
+        text: "Here is the chart.",
+        image: outboundImage(chart, "image/png", "chart.png"),
+        bindingId: message.bindingId,
+        idempotencyKey: `${message.activityId}:chart`,
+      });
+    }
+    return words;
+  },
+});
+```
+
+<Warning>
+Your handler must return something more than whitespace. The channel reads a blank answer as a failed
+turn and posts an error line, so you cannot post the picture yourself and then return `""` to suppress
+the text. Because `send` runs inside your handler, the picture lands **before** the words: give the
+picture its caption, as above, and return the words that follow it. If you need the caption and the
+picture in one message, build the reply yourself with `buildReply`.
+</Warning>
+
+`send` is best-effort and returns `false` rather than throwing, since a failed post must never break a
+live call. Pass an `idempotencyKey` whenever a retry is possible. `bindingId` says which StandIn
+connection the message is from, and one organisation can have several, so echo the inbound value
+rather than leaving it out.
+
+## `MEDIA:` markers
+
+Some agent frameworks let a reply name a file by writing a line like `MEDIA:/tmp/chart.png` and expect
+the channel to attach it. That marker is an **instruction to the channel**, not something anyone
+should see. A channel that does not understand the convention posts the line as prose, and the person
+reads a temporary file path in their chat. On a call it is worse: text to speech reads the path out,
+character by character.
+
+`parseMedia` takes the markers out and hands back what they referred to. `loadMedia` turns one
+reference into bytes, through the same guards everything else in this SDK uses.
+
+### `parseMedia`
+
+```ts
+import { parseMedia } from "@komaa/standin-sdk";
+
+const { text, refs } = parseMedia(await agent.ask(question));
+// text: "Here is the chart."
+// refs: ["/tmp/chart.png"]
+```
+
+The returned `text` is what to post **and** what to say. Both, always: the whole point is that nobody
+sees or hears the marker. `refs` holds what the markers pointed at, in the order they were written.
+The shape is exported as `AgentMedia`.
+
+Four things the parser does on purpose:
+
+- **It is case-insensitive and one marker per line.** `MEDIA:`, `media:` and `Media: ` all match.
+- **It is anchored to the end of the line**, so a path with spaces survives intact. The documented
+  form is backticked for exactly that reason, and the backticks are stripped: `` MEDIA:`/tmp/a b.png` ``
+  yields `/tmp/a b.png`. Splitting on whitespace would truncate that path at the first space.
+- **A line that is not plausibly a reference is left alone.** A reference has to start with `http://`,
+  `https://`, `/`, `./`, `../`, `~/` or a Windows drive letter, or end in `.png`, `.jpg`, `.jpeg`,
+  `.gif` or `.webp`. Without that narrowing, a sentence like "MEDIA: we should talk to them about it"
+  vanishes out of the answer and whoever wrote it never learns why.
+- **The blank line a removed marker leaves is collapsed.** Three or more newlines become two, which is
+  a paragraph break. Two are left alone, because they already are one.
+
+<Warning>
+Because the marker runs to the end of its line, nothing may follow the path on that line. Write
+`MEDIA:/tmp/chart.png` alone; `MEDIA:/tmp/chart.png and here it is` makes the whole trailing sentence
+part of the reference, and then `loadMedia` fails on a file that does not exist.
+</Warning>
+
+### `loadMedia`
+
+```ts
+import { loadMedia, parseMedia } from "@komaa/standin-sdk";
+
+const { text, refs } = parseMedia(reply);
+for (const ref of refs) {
+  try {
+    const picture = await loadMedia(ref, { roots: ["/srv/agent-output"] });
+    // picture is an OutboundImage, ready for buildReply or chat.send
+  } catch (err) {
+    // Worth logging and worth saying: the agent chose this reference, and the
+    // reason is a sentence it can act on next turn.
+    console.warn(`could not attach ${ref}: ${String(err)}`);
+  }
+}
+```
+
+Catch per reference, as above. One reference that will not load should cost that picture, never the
+whole answer: `text` is still worth posting, and the reason is a sentence the agent can be told.
+
+<Note>
+The SDK's own `logger` is not exported, and there is no `@komaa/standin-sdk/log` subpath to reach it
+through, so a sample like this uses `console` or your own logger. What the barrel does export is
+`setLogger`, which replaces the one the SDK writes its own lines with: pass an object with `debug`,
+`info`, `warn` and `error` and the SDK's lines land wherever the rest of your worker's do. The Python
+twin takes the other route and exposes `standin.log.logger` directly.
+</Note>
+
+It resolves one reference and returns an `OutboundImage`. It throws with something worth reading,
+because the caller is on a path where the alternative is a dropped answer with no explanation.
+
+Options are `LoadMediaOptions`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `roots` | `STANDIN_MEDIA_ROOTS` | Directories a local reference may be read from. |
+| `maxBytes` | `OUTBOUND_IMAGE_MAX_BYTES` | The size ceiling, applied to a fetch and to a file alike. |
+| `name` | the basename of the path or URL | The filename the picture is sent with. |
+
+What it does, and why each branch exists:
+
+- **`http://` or `https://`** goes through the SDK's own fetch guard with a ten second budget, so a
+  reference aimed at a private, loopback, link-local or reserved address is refused rather than
+  fetched. The address the socket actually connects to is re-checked, which closes the window where a
+  hostname resolves publicly for the validation and privately for the fetch. See
+  [Fetching an image a model chose](/typescript-sdk/vision#fetching-an-image-a-model-chose).
+- **Any other scheme is refused by name**, including `file://` and `data:`. Handing a `file://` URL to
+  a URL fetcher is the usual way around a path guard, so it is rejected before anything opens it.
+- **Everything else is a local path**, read only from a directory an operator named, and only after a
+  `stat`: the size is checked **before** the read, because the point of a cap is not to load the file.
+
+Whatever the branch, the bytes are sniffed at the end and the sniffed type is what gets sent. A local
+file declares no type at all, so the sniff simply decides. A fetch does declare one, and a declared
+type that disagrees with the bytes throws instead of being relabelled, with only
+`application/octet-stream` accepted as "no opinion". A type from a response header is a claim; the
+bytes are the fact.
+
+<Warning>
+A response with no `content-type` header at all is read as `image/jpeg`, so a PNG served bare is
+refused with `that was served as image/jpeg but the bytes are image/png`. That is the fetcher's
+default, not a sniff, and it is the one refusal on this list that usually means the server is wrong
+rather than the picture. Fix the header, or fetch the bytes yourself and hand them to
+`outboundImage`.
+</Warning>
+
+| What you passed | What comes back |
+|---|---|
+| `""` or whitespace | `there was nothing to send` |
+| A local path with no roots configured | `sending a local file is off until a directory is named in STANDIN_MEDIA_ROOTS` |
+| A path outside the roots | `that file is outside the directories this worker may read` |
+| `file://`, `data:`, `s3://` | `<scheme> references are not allowed here` |
+| A missing file | `no such file` |
+| A file over the cap | `that file is N bytes, over the M limit` |
+| A text file, or an SVG | `that file is not a picture this can send` |
+| A URL served as one type, bytes of another | `that was served as X but the bytes are Y` |
+
+### `mediaRoots` and `STANDIN_MEDIA_ROOTS`
+
+```ts
+import { MEDIA_ROOTS_ENV, mediaRoots } from "@komaa/standin-sdk";
+
+MEDIA_ROOTS_ENV;                // "STANDIN_MEDIA_ROOTS"
+mediaRoots();                   // [] until an operator sets it
+mediaRoots(["/srv/charts"]);    // or pass them, bypassing the environment
+```
+
+`mediaRoots` returns the directories a local reference may be read from, resolved through symlinks.
+With no argument it reads `STANDIN_MEDIA_ROOTS`, split on the platform path delimiter: `:` on Linux
+and macOS, `;` on Windows. `~/` is expanded. A root that cannot be resolved, because nothing is there,
+is dropped, since a directory that does not exist cannot contain anything.
+
+**It is empty by default, and that is the whole design.** Sending a local file is off until somebody
+opts in. An agent can be talked into writing `MEDIA:/etc/passwd`, and the answer to that has to be a
+refusal rather than a file read followed by an upload into somebody's chat.
+
+Two details in the containment check earn their keep:
+
+- **Both sides are resolved through symlinks first.** A symlink inside a root that lands outside it is
+  judged by where it lands, so dropping a link named `innocent.png` into an allowed directory buys
+  nothing.
+- **The comparison is separator-terminated.** Without that, `/tmp/rootevil` passes for `/tmp/root`,
+  and one adjacent directory becomes readable to a path a model chose.
+
+Name the narrowest directory that works, and make it one your agent writes into rather than one it
+merely happens to be able to read:
+
+```bash
+export STANDIN_MEDIA_ROOTS=/srv/agent-output
+```
+
+Pass `roots` explicitly instead when a single worker serves more than one purpose. An explicit list
+wins over the environment entirely, so the variable is not consulted at all on that call. It is still
+resolved the same way: a root you pass that does not exist is dropped exactly as one from the
+environment would be, so an explicit list is not a way around the check.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Chat" icon="comments" href="/typescript-sdk/chat">
+    The lane a picture travels on, and what it echoes back.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/typescript-sdk/configuration">
+    Every variable the SDK reads, including the roots above.
+  </Card>
+</CardGroup>

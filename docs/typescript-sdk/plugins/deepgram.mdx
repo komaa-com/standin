@@ -1,0 +1,156 @@
+---
+title: "Deepgram plugin"
+description: "Answer Microsoft Teams calls with a Deepgram Voice Agent, using the StandIn TypeScript SDK."
+keywords: ["Deepgram Microsoft Teams", "deepgram voice agent", "@komaa/standin-sdk", "Microsoft Teams AI call"]
+icon: "ear-listen"
+---
+
+`@komaa/standin-sdk/deepgram` puts [Deepgram](https://developers.deepgram.com/docs/voice-agent) on a real Microsoft Teams call. StandIn answers the call and dials your worker; this plugin answers that dial, opens one session per call, and relays the audio both ways.
+
+## Install and run
+
+There is nothing to install beyond the SDK. Deepgram is reached over an ordinary WebSocket, so this plugin adds no dependency.
+
+```bash
+npm install @komaa/standin-sdk
+```
+
+```bash
+export STANDIN_SECRET=...        # your StandIn connection secret
+export DEEPGRAM_API_KEY=...
+npx standin-deepgram
+```
+
+Expose port `9442` at the `/msteams/calling` path and register the public `wss://` URL as your StandIn identity's agent voice URL. The full walkthrough is in the [Quickstart](/typescript-sdk/quickstart), and there is a runnable example at [examples/deepgram-msteams-connector](https://github.com/komaa-com/standin/tree/main/examples/deepgram-msteams-connector).
+
+## The audio format
+
+Audio is pinned to `linear16` at 16 kHz in both directions, which is exactly what a Microsoft Teams call carries, so the hot path is a copy.
+
+## What the agent can do about the call
+
+Declared automatically when the call starts, so there is nothing to set up on the provider's side.
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `end_call` | none | Hang up. |
+| `express` | `emotion` | Set the avatar's expression on the bot's tile. See [The avatar](/typescript-sdk/avatar#the-emotion-the-face-wears). |
+| `show_image` | `url`, `caption?`, `display?` | Put a picture on the bot's video tile. |
+| `look` | `source?`, `question?` | Look at the caller's screen share or camera. |
+| `look_back` | `question?` | Look again at something the caller has already moved past. Recorded calls only. |
+
+`show_image` fetches the URL through the SDK's guard: public hosts only, no private or link-local addresses, and the address is re-checked at connect time. `display` is `fullscreen` or `overlay`, and this plugin routes the call through `CallTools.dispatch`, so the model's choice is honoured. See [Vision and the avatar](/typescript-sdk/vision) for what each placement is for, and [Sending a picture](/typescript-sdk/sending-pictures) for putting a picture into chat instead.
+
+A Voice Agent hears but does not see, so `look` needs a vision model of your choosing. Set `STANDIN_VISION_API_URL` and `STANDIN_VISION_MODEL` to any OpenAI-compatible endpoint that accepts images, including one you run yourself. The frame is sent for inference and **not stored**, and only the description comes back. Without it the agent is told plainly that looking is unavailable, rather than being left with silence. The whole surface is on [Vision and the avatar](/typescript-sdk/vision).
+
+Pass a `describer` in the handler options to point this plugin at a different vision model from the one the environment names, which is how one worker answers two identities with two vision budgets. Build it with `FrameDescriber.fromEnv()` or its constructor, both on [Vision and the avatar](/typescript-sdk/vision#giving-a-voice-model-eyes).
+
+## How context reaches the agent
+
+The Voice Agent API has no non-interrupting context message, so this plugin folds participant counts, key presses and recording changes into the agent's prompt and pushes it with an update.
+
+That has a cost worth knowing: **the prompt is resent in full on every change**, so the context section is a rolling window of the last eight notes rather than a transcript. A meeting where people join and leave repeatedly keeps the recent notes and drops the old ones, which is the right trade when the alternative is a prompt that grows for the length of the call.
+
+Context that arrives before the agent socket is open is held rather than dropped, then folded in once it exists. The "there are N people here, stay quiet" line and the recording change both land in exactly that gap.
+
+## Tools of your own
+
+A custom tool runs in **your** worker, so it can reach whatever your worker can reach:
+
+```ts
+import { CallServer } from "@komaa/standin-sdk";
+import {
+  DeepgramHandler,
+  deepgramConfigFromEnv,
+  type CustomTool,
+} from "@komaa/standin-sdk/deepgram";
+
+const tools: CustomTool[] = [
+  {
+    name: "open_ticket",
+    description: "Open a support ticket for the caller.",
+    parameters: {
+      type: "object",
+      properties: { summary: { type: "string" } },
+      required: ["summary"],
+    },
+    // ctx.call is the live call; ctx.recording says whether it is being recorded.
+    handler: async (params, ctx) => `opened ticket for ${String(params.summary)}`,
+  },
+];
+
+const config = deepgramConfigFromEnv();
+const server = new CallServer({
+  handlerFactory: () => new DeepgramHandler({ config, tools }),
+});
+await server.start();
+```
+
+The `description` is what the model reads to decide whether to call it, so write it for a model rather than for a developer. Keep the handler fast: the caller is waiting in silence while it runs.
+
+A custom tool may not shadow a built-in one. That is refused when the handler is built rather than at the first call, because a shadowed `end_call` is an agent that has quietly lost the ability to hang up.
+
+## Inside your own worker
+
+The plugin is a `CallHandler` like any other:
+
+```ts
+import { CallServer } from "@komaa/standin-sdk";
+import { DeepgramHandler, deepgramConfigFromEnv } from "@komaa/standin-sdk/deepgram";
+
+const config = deepgramConfigFromEnv();
+const server = new CallServer({
+  handlerFactory: () => new DeepgramHandler({ config }),
+});
+await server.start();
+```
+
+Read the configuration **once**, then close over it. `handlerFactory` runs once per call, so
+`new DeepgramHandler()` with nothing passed reads the environment again on every call, and a key
+removed after startup would fail the next caller rather than failing you. `serve()`, which is what
+`npx standin-deepgram` runs, does exactly this, then waits for `SIGINT` or `SIGTERM` before calling
+`server.aclose()`. `server.start()` returns as soon as the listener is bound, so a script that
+ends there exits before a single call arrives, and `aclose()` is what drains live calls and
+releases the port.
+
+## Configuration
+
+| Variable | What it is |
+|---|---|
+| `DEEPGRAM_API_KEY` | Your API key. Never logged, never sent to StandIn. |
+
+<Accordion title="Optional settings">
+
+| Variable | What it is |
+|---|---|
+| `DEEPGRAM_LISTEN_MODEL` | Speech to text. Defaults to `nova-3`. |
+| `DEEPGRAM_SPEAK_MODEL` | Text to speech. Defaults to `aura-2-thalia-en`. |
+| `DEEPGRAM_THINK_PROVIDER` | Which vendor reasons. Defaults to `open_ai`. |
+| `DEEPGRAM_THINK_MODEL` | Defaults to `gpt-4o-mini`. |
+| `DEEPGRAM_THINK_ENDPOINT_URL` | Reason with your own model instead. |
+| `DEEPGRAM_THINK_ENDPOINT_HEADERS` | A JSON object of headers for that endpoint. Carries your model credentials, so it is never logged. Anything but a JSON object is refused when the configuration is read. |
+| `DEEPGRAM_INSTRUCTIONS` | The agent's base prompt. |
+| `DEEPGRAM_GREETING` | What the agent says first. |
+| `DEEPGRAM_LANGUAGE` | Defaults to `en`. |
+| `DEEPGRAM_AGENT_HOST` | The Voice Agent socket host. Defaults to `agent.deepgram.com`. Must be a deepgram.com host. |
+| `DEEPGRAM_API_HOST` | The host the REST calls go to. Defaults to `api.deepgram.com`. Must be a deepgram.com host. |
+| `DEEPGRAM_LOG_TRANSCRIPTS` | Exactly `true` to log turns. Gated a second time on the call being recorded. |
+
+</Accordion>
+
+The think-endpoint pair is the reason most people pick this plugin: point `DEEPGRAM_THINK_ENDPOINT_URL` at a model of your own and Deepgram keeps the listening and the speaking while your model does the reasoning.
+
+<Note>
+  The configuration is read once when the worker starts, not per call, so a missing key stops the worker at startup rather than surprising the first caller. Both hosts are checked against the deepgram.com suffix, because your API key travels to them: a wrong host would be credential leakage rather than a failed call. The reasoning behind that shape is on [Configuration](/typescript-sdk/configuration).
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Realtime providers" icon="bolt" href="/typescript-sdk/realtime-providers">
+    The startup buffer, the echo guard and barge-in this plugin sits on.
+  </Card>
+  <Card title="Vision and the avatar" icon="eye" href="/typescript-sdk/vision">
+    What `look`, `show_image` and `express` reach.
+  </Card>
+</CardGroup>

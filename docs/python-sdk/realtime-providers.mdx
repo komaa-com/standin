@@ -1,0 +1,272 @@
+---
+title: "Realtime providers"
+description: "StartupBuffer and EchoGuard for a speech-to-speech agent: what arrives before you are ready, and why the agent answers itself, in the StandIn Python SDK."
+keywords: ["realtime speech to speech Microsoft Teams", "agent answering its own echo", "StartupBuffer early caller audio", "barge-in RMS threshold", "playout clock echo suppression"]
+icon: "bolt"
+---
+
+A realtime speech-to-speech provider is handed the caller's audio and hands audio back, and the turn-taking is theirs. That is the whole reason to use one, and it is why [Turn-taking](/python-sdk/voice) is a page you can skip: no segmenter, no paced playback, no pipeline of three vendors to keep in step.
+
+This page is the other half of that bargain. The provider owns the turn. It does not own the two things on either side of it:
+
+- **what arrived before your provider was ready to take it**, which the provider cannot hold because it did not exist yet
+- **whether the audio coming back is somebody else's voice or your own**, which the provider cannot know because it only sees one stream
+
+Neither is a property of any framework, so neither lives in a plugin. Both are here.
+
+```python
+from standin import (
+    ECHO_BARGE_IN_RMS,
+    ECHO_SUPPRESSION_WINDOW_MS,
+    MAX_PENDING_AUDIO,
+    MAX_PENDING_CONTEXT,
+    EchoGuard,
+    StartupBuffer,
+    pcm16_rms,
+)
+```
+
+Every name on this page is exported from `standin`. If you would rather import the modules, the buffer and its two caps live in `standin.startup` and the guard and its two constants in `standin.echo_guard`. `pcm16_rms` is defined once in `standin.audio` and re-exported from `standin.echo_guard`, because an echo guard, a barge-in check and a voice segmenter all want it and there must not be three copies of it.
+
+## What arrives before your agent is ready
+
+The call starts the moment StandIn dials. Your agent starts later: a socket has to open, a room has to be joined, a session has to be configured, an agent job has to be dispatched and accepted.
+
+`on_start` covers part of that gap for you, because audio is not delivered while it runs. It does not cover the rest of it. A socket that is open is not a session that is configured, a room you have joined is not an agent that has joined it, and a handler that returns from `on_start` rather than holding the call open has handed itself the same gap deliberately, which is often the right call: `on_start_timeout` is 15 seconds and a caller waiting on a slow provider hears dead air. See [on_start](/python-sdk/call-handler#on_start).
+
+Two things land in that window and both matter.
+
+**The caller's first words.** People start talking the instant the call connects, and the first thing they say is very often the reason they called. Drop it and the agent opens by asking a question that was already answered, which is the single most common way a demo call goes wrong.
+
+**The first context.** The `"There are 4 human participants on this call. Stay quiet unless directly addressed."` line and the `"The Microsoft Teams call recording is now ACTIVE."` change both land in that same first moment. Drop those and a [group gate](/python-sdk/group-calls) never engages, so the agent answers every turn of a meeting, and a recording gate never opens, so an agent that waits to be told the call is recorded waits for the whole call. Neither failure looks like a dropped message. Both look like a feature that was never built.
+
+<Note>
+  Gate your own storage on `session.recording_active`, which the SDK keeps current from `session.start` and every later status change, rather than on a sentence you happened to catch. What the buffer protects is the copy that reaches your **provider**, which has no other way to learn either fact.
+</Note>
+
+```python
+from standin import CallSession, StartupBuffer
+
+
+class MyHandler:
+    def __init__(self) -> None:
+        self._agent = None
+        self._pending = StartupBuffer()
+
+    async def on_start(self, session: CallSession) -> None:
+        self._agent = await connect_to_provider()
+        await self._pending.release(
+            send_audio=self._agent.send_audio,
+            send_context=self._agent.send_context,
+        )
+        if any(self._pending.dropped):
+            logger.info("standin: the caller outran the agent starting up")
+
+    async def on_caller_audio(self, pcm: bytes) -> None:
+        if self._pending.holding:
+            self._pending.audio(pcm)
+        else:
+            await self._agent.send_audio(pcm)
+
+    async def on_context(self, text: str) -> None:
+        if self._pending.holding:
+            self._pending.context(text)
+        else:
+            await self._agent.send_context(text)
+```
+
+| Member | What it does |
+|---|---|
+| `StartupBuffer(max_audio=MAX_PENDING_AUDIO, max_context=MAX_PENDING_CONTEXT)` | One per call. Each bound is floored at 1. |
+| `holding` | Whether the agent is still being set up. False after `release` or `discard`. |
+| `audio(pcm)` | Hold one frame of the caller's voice. Empty input is ignored. |
+| `context(text)` | Hold one line of call context. Empty input is ignored. |
+| `await release(send_audio=None, send_context=None)` | Hand everything over, in order, and stop holding. Returns `(audio frames, context lines)`. |
+| `dropped` | What was lost to the bounds, as `(audio frames, context lines)`. |
+| `discard()` | Throw it away, for a call that ended before the agent was ready. |
+
+Order is preserved within each lane, and **audio is released before context**. The provider needs the caller's words in the order they were said; the context is a note about the call rather than part of the conversation, so it belongs after the words and not interleaved with them.
+
+Both callbacks may be sync or async, and each is awaited only if it returns something awaitable. A provider's send is often fire-and-forget, and forcing a coroutine on one that is not is how a plugin ends up wrapping every send in a lambda. Either callback may be omitted, for a lane your provider has no route for: the buffer still drains and still stops holding, it just sends nothing.
+
+`release` is safe to call twice: the second call releases nothing and returns `(0, 0)`. That matters on the failure paths, where `on_start` can end early in more than one place.
+
+## Audio first, context second, oldest dropped first
+
+Two caps, both defaults, both overridable per buffer:
+
+| Constant | Value | What it is |
+|---|---|---|
+| `MAX_PENDING_AUDIO` | `200` | Frames of the caller's voice. At the wire's 20 ms frame that is **4 seconds** of speech. |
+| `MAX_PENDING_CONTEXT` | `20` | Lines of call context. Context sentences are rare and each one is small, so this is generous. |
+
+Four seconds is enough to hold an opening sentence and far short of enough to hide a socket that never opened. That is the whole calculation. A provider that is going to connect has connected by then; a provider that is not going to connect must not be allowed to accumulate the caller's entire call in memory while it fails to, on every concurrent call the worker is carrying.
+
+When the cap is reached, the **oldest** entry goes and the newest is kept. If something has to be lost, lose the stale audio: the words the agent is about to answer are the ones the caller just said, and an agent that opens on a four-second-old fragment is worse than one that opens on the most recent sentence.
+
+<Note>
+  Log a non-zero `dropped`. It is the one signal that tells you the caller outran your provider's startup, and there is no other place it shows up: the call sounds normal, the agent answers, and the only trace is the sentence nobody accounted for. Treat it as a startup-latency alarm rather than an error.
+</Note>
+
+`discard()` exists for the call that ends before the agent is ready. Use it in `aclose` when `holding` is still true, rather than releasing into a provider you are about to close.
+
+## The agent answering itself
+
+`EchoGuard` decides, per inbound frame, whether the caller's audio reaches the model.
+
+On a speakerphone, and on any laptop whose user has not got a headset on, the agent's own voice comes out of the speaker and goes straight back into the microphone. It arrives at your handler as caller audio. The provider's voice detection hears a turn, ends it, and replies to it. Then that reply loops back, and it replies to that. The caller is silent throughout and cannot get a word in, and it continues until somebody hangs up. It is not a subtle degradation, it is the call being taken over.
+
+<Warning>
+  **The two SDKs are not the same shape here.** This SDK has an `EchoGuard` **class** that owns its own playout clock. The TypeScript SDK has **no class**: it has one pure function, `shouldSuppressEcho`, the clock is yours to keep, and its polarity is inverted, `true` there meaning **drop the frame** where `allow_input` here returns `True` to **pass** it. Nothing about `EchoGuard` ports across as written. The differences are tabulated at the end of this page.
+</Warning>
+
+```python
+from standin import (
+    REALTIME_SAMPLE_RATE_HZ,
+    SAMPLE_RATE_HZ,
+    EchoGuard,
+    FrameAligner,
+    frame_duration_ms,
+    pcm16_rms,
+    resample_pcm16,
+)
+
+
+class MyHandler:
+    def __init__(self) -> None:
+        # enabled=True, tail_window_ms=600, barge_in_rms=0.04
+        self._echo = EchoGuard()
+        self._aligner = FrameAligner()
+
+    async def on_caller_audio(self, pcm: bytes) -> None:
+        if not self._echo.allow_input(pcm16_rms(pcm)):
+            return
+        await self._client.append_input(
+            resample_pcm16(pcm, SAMPLE_RATE_HZ, REALTIME_SAMPLE_RATE_HZ)
+        )
+
+    async def _on_model_audio(self, pcm24: bytes) -> None:
+        pcm = resample_pcm16(pcm24, REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ)
+        for frame in self._aligner.push(pcm):
+            await self._call.send_audio(frame)
+            # Duration, not frame count: it is what the guard compares
+            # against wall time.
+            self._echo.note_output(frame_duration_ms(frame))
+```
+
+| Member | What it does |
+|---|---|
+| `EchoGuard(*, enabled=True, tail_window_ms=600, barge_in_rms=0.04)` | Keyword only. One per call. |
+| `note_output(duration_ms, now=None)` | Record that this much of our audio was handed to StandIn. |
+| `speaking(now=None)` | Is our own audio still likely to be audible at the caller's end? |
+| `allow_input(rms, now=None)` | Should this inbound frame reach the model? |
+| `collapse(now=None)` | A barge-in was accepted: stop treating inbound audio as echo. |
+| `mark_caller_turn()` | The caller has spoken a real turn; barge-in is allowed from now on. |
+
+`ECHO_SUPPRESSION_WINDOW_MS` is `600` and `ECHO_BARGE_IN_RMS` is `0.04`, the same values as the constructor defaults, exported so configuration and tests can name them rather than repeat them.
+
+What `allow_input` does, in full:
+
+| State | Outcome |
+|---|---|
+| `enabled=False` | Through. |
+| Not speaking | Through. |
+| Speaking, before the caller's first turn | Dropped, at any loudness. |
+| Speaking, after the first turn, `rms < barge_in_rms` | Dropped. |
+| Speaking, after the first turn, `rms >= barge_in_rms` | Through. |
+
+`pcm16_rms` returns root-mean-square amplitude normalised to `0.0` to `1.0`, and it is dependency-free because it runs on every inbound frame of every call. See [Audio](/python-sdk/audio).
+
+`enabled=False` is a real option, not a test hook. On a headset-only deployment there is no acoustic path from the speaker back into the microphone, so the guard has nothing to catch and every frame it filters is a barge-in the caller does not get.
+
+## A playout clock, not a send clock
+
+A realtime model streams its answer far faster than realtime. Five seconds of speech can be handed over in a fraction of a second, and a call consumes audio at one second per second, so the rest of it is still buffered and still being heard long after the send returned.
+
+So wall-clock send time is useless here. A guard keyed on "did we send something recently" disarms a few hundred milliseconds into a sentence that is still coming out of the caller's speaker, which is the exact moment the echo it exists to catch starts arriving.
+
+`note_output(duration_ms)` accumulates the **duration** of what was sent instead, and `speaking()` asks whether now is still before that playout horizon plus the tail:
+
+```python
+self._playout_end_ms = max(now, self._playout_end_ms) + duration_ms
+```
+
+The `max(now, ...)` rather than a bare addition is the part worth reading twice. After a gap in speaking, the old horizon is already in the past, and adding to a stale horizon leaves the clock permanently behind real time, so the guard never arms again for the rest of the call and the failure looks like a guard that was never switched on.
+
+Pass `frame_duration_ms(frame)` rather than counting frames. Outbound chunk lengths are not fixed, and a frame count drifts against real time in exactly the direction that hurts.
+
+## No barge-in until the caller's first real turn
+
+Until `mark_caller_turn()` has been called once, `allow_input` drops every frame while `speaking()` is true, however loud it is.
+
+That is not a conservative default, it is the specific case. The agent's opening greeting is the first thing on the call, it echoes back, and it is loud, because a greeting is spoken at full volume into a room nobody is talking over yet. Without this rule the loudest possible echo arrives at the exact moment the guard has no history to compare it against, the agent treats it as a barge-in, interrupts itself, and greets itself again. And again.
+
+Call `mark_caller_turn()` where you know a real turn happened: on a finished caller transcript, and on a barge-in your provider reported and you accepted. It is a latch, so calling it repeatedly costs nothing.
+
+## Collapse on an accepted barge-in
+
+When you accept a barge-in you cancel the playback StandIn still holds. The guard does not know that. It counted that audio as if the caller would hear all of it, so its horizon is still sitting several seconds in the future.
+
+Without `collapse()` the guard therefore keeps filtering the caller's microphone for the length of the buffer you just threw away, which is precisely the words they interrupted you to say. The caller interrupts, the agent stops, the caller talks, and the agent hears nothing.
+
+```python
+async def _on_barge_in(self) -> None:
+    await self._call.cancel_playback()   # first: un-send what StandIn still holds
+    self._aligner.reset()                # the residual belongs to a dead turn
+    self._echo.collapse()                # the horizon covers audio nobody will hear
+    self._echo.mark_caller_turn()        # this was a real turn
+    await self._client.cancel_response() # then: stop the model generating more
+```
+
+`collapse()` pulls the horizon to `now - tail_window_ms`, so `speaking()` is false immediately rather than at the end of a window. Call it anywhere you call `cancel_playback()`, which includes `on_goodbye`: a goodbye cancels playback too, and a guard left armed after one spends the last seconds of the call filtering the caller's reply to it. See [Barge-in](/python-sdk/call-handler#barge-in-and-cancel-playback).
+
+## The tail belongs to your provider
+
+`tail_window_ms` is a constructor argument and not a constant, and that is a deliberate line. It covers the network and the jitter buffer between you and the caller's speaker, and then however long the provider's own voice detector keeps hearing you after the audio stops. The first part is the wire and is the same for everybody. The second is a property of that provider, and providers differ.
+
+`600` is the default and the value in `ECHO_SUPPRESSION_WINDOW_MS`. Move it with the failure you actually see:
+
+- Too short and the tail of your own sentence gets through as a turn, and the agent answers its own last three words.
+- Too long and a genuine interruption in the moments after you stop speaking is dropped, and the caller has to say it twice.
+
+`barge_in_rms` is the same kind of knob on the same kind of trade. `0.04` on the `0.0` to `1.0` scale `pcm16_rms` returns. Raise it in a loud room and you buy fewer false barge-ins with a real cost: the case it then gets wrong is a quiet caller trying to interrupt a loud agent, which is the caller who most needs the interruption to work.
+
+Tune both per provider, keep them in your plugin's configuration rather than in its code, and treat the defaults as a starting point that was measured on a call rather than a constant that was derived from one.
+
+## What is not the same in the TypeScript SDK
+
+`StartupBuffer` is the same object in both, with the same caps and the same two lanes. One detail is language-shaped: `dropped` and the return of `release` are tuples here, `(audio, context)`, and objects there, `{ audio, context }`.
+
+The echo guard is genuinely different, and a port that assumes otherwise runs and then fails on a real call.
+
+| | Python SDK | TypeScript SDK |
+|---|---|---|
+| Shape | `EchoGuard`, a class holding per-call state | `shouldSuppressEcho`, a pure function |
+| Polarity | `allow_input(...)` is `True` to **pass** the frame | `shouldSuppressEcho(...)` is `true` to **drop** it |
+| Input | a loudness float you computed yourself | the PCM16 buffer, measured for you |
+| The playout clock | inside the object, fed by `note_output(duration_ms)` | yours, passed as `playbackActiveUntil` |
+| Clock source | monotonic milliseconds | epoch milliseconds, from `Date.now()` |
+| Accepted barge-in | `collapse()`, disarms immediately | assign the horizon yourself, tail window still armed |
+| First caller turn | `mark_caller_turn()`, a latch on the object | `allowBargeIn`, an option passed per frame |
+| Disabling it | `EchoGuard(enabled=False)` | `suppressInputDuringPlayback: false` |
+
+The polarity row is the one that costs a call. Reading `allow_input` as "should I suppress this" mutes the caller for the whole call and passes the echo, which is the exact failure inverted.
+
+The constants are the same in both and carry the same names, `ECHO_SUPPRESSION_WINDOW_MS` at `600` and `ECHO_BARGE_IN_RMS` at `0.04`, so configuration and tests can name them rather than repeat them.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Group calls" icon="users" href="/python-sdk/group-calls">
+    The gate that keeps the agent out of a meeting it was not addressed in.
+  </Card>
+  <Card title="Call handler" icon="code" href="/python-sdk/call-handler">
+    A full realtime handler, with the resampling, the alignment and the barge-in.
+  </Card>
+  <Card title="Turn-taking" icon="waveform-lines" href="/python-sdk/voice">
+    The other half: an agent built from separate transcription, model and speech.
+  </Card>
+  <Card title="Audio" icon="waveform" href="/python-sdk/audio">
+    `frame_duration_ms`, `pcm16_rms`, the resampler and the frame aligner.
+  </Card>
+</CardGroup>

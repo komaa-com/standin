@@ -1,0 +1,412 @@
+---
+title: "Call handler"
+description: "The five optional methods a StandIn Python plugin implements, the CallSession surface, and barge-in with cancel_playback."
+keywords: ["standin call handler", "on_caller_audio", "cancel_playback barge-in", "python teams call handler"]
+icon: "code"
+---
+
+The handler is the whole contract between the SDK and your agent, and it is deliberately five methods wide. `CallServer` owns everything that is the same for every framework. A handler owns only what differs: what to do with a caller's voice, and where the reply comes from.
+
+```python
+from standin import CallServer, CallSession
+
+
+class MyHandler:
+    async def on_start(self, session: CallSession) -> None: ...
+    async def on_caller_audio(self, pcm: bytes) -> None: ...
+    async def on_context(self, text: str) -> None: ...
+    async def on_goodbye(self, text: str) -> None: ...
+    async def aclose(self, reason: str) -> None: ...
+
+
+server = CallServer(handler_factory=MyHandler)
+```
+
+`CallHandler` is a `typing.Protocol`. Nothing inherits from anything, every method is optional, and a missing method is a no-op, so a handler that only wants audio implements only `on_caller_audio`. A synchronous method is accepted too: a callback with nothing to await should not be forced to declare `async`.
+
+`handler_factory` is called with no arguments and builds **one handler per call**, so per-call state can live on `self` and configuration is closed over rather than threaded through the server.
+
+## Ordering and failure
+
+Three rules govern when your methods are called, and all three are the same in both SDKs.
+
+- **Nothing arrives before `on_start` returns.** Inbound messages are handled serially, so caller audio packed into the same read as `session.start` waits for your `on_start`. A slow start delays the caller rather than dropping frames.
+- **Context that arrives before the handler exists is dropped.** The handler is built when `session.start` lands, and every dispatch is guarded on it existing. On a fast dial a participants or recording sentence can beat that frame, and there is nobody to give it to.
+- **An exception ends that call alone.** It is logged and the call closes with the reason `handler-failure`. One bad call must never take the worker with it.
+
+The server does not queue on your behalf **after** `on_start` either, because what "ready" means is a framework's own business. A handler whose provider socket opens inside `on_start` still gets caller audio and context the moment that returns, which is what [`StartupBuffer`](/python-sdk/realtime-providers#what-arrives-before-your-agent-is-ready) is for: a bounded holder for the caller's first words and the first context sentence, with the oldest dropped first.
+
+## CallSession
+
+`on_start` receives the session, and it is the handler's only way to reach the socket. It is valid until the call ends.
+
+Seventeen members, and this is all of them.
+
+| Member | What it is |
+|---|---|
+| `session.call_id` | StandIn's id for this call. Authenticated: it is the value the handshake HMAC signed, not something a caller supplied. |
+| `session.start` | The `session.start` that opened the call: `call_id`, `thread_id`, `caller`, `direction`, `recording_status`, `tenant_id`. |
+| `await session.send_audio(pcm)` | Send the agent's voice to the caller. PCM16, 16 kHz, mono, little-endian. |
+| `await session.cancel_playback()` | Drop whatever agent audio StandIn still has buffered. See [Barge-in](#barge-in-and-cancel-playback). |
+| `await session.end(reason)` | End the call. Idempotent, and the first reason wins. |
+| `session.recording_active` | Whether the call is being recorded, right now. |
+| `session.speaker` | Who is speaking, when StandIn sends unmixed audio. `None` on the mixed path. |
+| `session.participant_count` | How many people are on the call. Zero until StandIn says. |
+| `session.answered` | Whether anything has actually taken this call yet. |
+| `session.mark_answered()` | Say that an agent has taken the call. Synchronous, stamped once, never re-stamped. Sending audio already counts, so most plugins never call it. |
+| `session.buffered_bytes` | How much outbound data the socket has not flushed. The number a continuous sender watches before deciding to drop a frame. It reads `0` when the transport cannot report it, so treat a zero as no evidence of backpressure rather than proof of an idle socket. |
+| `session.media_time_ms` | The outbound audio timeline, in milliseconds. The clock a video frame must be stamped with, because a wall clock keeps ticking through listening silence and this one does not. |
+| `session.latest_video_frame(source)` | The most recent frame the caller showed, or `None`. Synchronous: it reads what the frame loop already stored. See [Vision](/python-sdk/vision). |
+| `await session.send_tile_frame(jpeg, width, height)` | One frame of continuous video on the bot's tile. See [The avatar](/python-sdk/avatar). |
+| `await session.display_image(image, mime, duration_ms, mode, caption)` | Draw an image on the bot's tile for a few seconds. See [Vision](/python-sdk/vision). |
+| `await session.express(emotion)` | Hint the emotion the avatar wears. See [The avatar](/python-sdk/avatar). |
+| `await session.send_speech_marks(marks)` | The viseme timeline for one utterance, which is what drives lip-sync. See [The avatar](/python-sdk/avatar). |
+
+`recording_active` is one flag the server keeps current, so no plugin re-derives it from the context
+sentence it happened to see. A reported `recording.status` **wins over the `session.start` snapshot**,
+whichever arrives first: the snapshot omits the field when the state was unknown at answer time, and an
+omitted field is not "not recording".
+
+<Warning>
+Gate on `recording_active` before anything that STORES what the caller said or showed with a third
+party. A recorded call is one the caller was told is being kept; an unrecorded one is not.
+</Warning>
+
+### What session.start carries
+
+Both are frozen dataclasses, and both are on the barrel for a handler that wants to annotate them:
+`from standin import Caller, SessionStart`.
+
+```python
+class SessionStart:
+    call_id: str
+    thread_id: str
+    caller: Caller
+    direction: str = "inbound"          # "inbound" or "outbound"
+    recording_status: str | None = None
+    tenant_id: str | None = None
+
+
+class Caller:
+    aad_id: str | None = None
+    display_name: str | None = None
+    tenant_id: str | None = None
+```
+
+Blank or absent values normalize to `None`, so treat every caller field as optional. A `direction`
+that is neither `inbound` nor `outbound` reads as `inbound` rather than being carried through as
+something a branch has to handle.
+
+<Warning>
+`caller.aad_id` is `None` for guest and anonymous callers, which means an anonymous caller can never match an allowlist. That is the intended behaviour, not a gap. Never use it as a bare key for per-caller memory without checking it first either, or two anonymous callers share one identity.
+</Warning>
+
+The server owns the outbound sequence number and the audio timeline, so a handler that swaps or re-publishes its audio source cannot make timestamps jump backwards. You never compute a `seq` and you never build a frame.
+
+### Answering, and the plugin that has to say so
+
+The server runs a stale-call reaper: 120 seconds a call may run with **nothing having answered it**,
+after which it ends as `no-agent-answered`. It is the gap none of the other watchdogs cover, because
+`session.start` arrived, `on_start` succeeded, and the caller is still talking the whole time.
+
+Sending audio is answering, so a handler that speaks is covered without doing anything. A handler that
+answers by a route the server cannot see, joining a room and letting an agent speak there, has to say
+so:
+
+```python
+async def on_agent_track_published(self) -> None:
+    self._call.mark_answered()   # the agent's OWN track, not a participant joining
+```
+
+<Warning>
+Call it when the agent's own audio track appears, not when a participant connects. Monitors, recorders
+and avatar workers all connect, and none of them is an agent answering.
+</Warning>
+
+See [the stale-call reaper](/python-sdk/call-server#the-stale-call-reaper) for the timer itself.
+
+### send_audio can drop what you hand it
+
+Past 1 MB of unflushed transport buffer (`MAX_AUDIO_BUFFER_BYTES`), agent audio is **shed rather than queued**: `send_audio` advances the timeline and returns without sending, and logs at most once every five seconds. The caller hears a gap rather than the call wedging, and the timeline still advances because a dropped frame is a gap in what they hear, not a rewind.
+
+Control frames are never shed. A call that cannot be ended is the failure this exists to prevent.
+
+`session.buffered_bytes` is how you see it coming before a continuous stream starts losing frames. See [Backpressure](/python-sdk/call-server#backpressure).
+
+---
+
+## on_start
+
+```python
+async def on_start(self, session: CallSession) -> None:
+    self._call = session
+    self._client = await open_realtime_socket()
+```
+
+The call is live. Join a room, open a realtime socket, build an agent, whatever this framework needs.
+
+Audio does not flow until this returns, so a slow start delays the caller rather than dropping frames. That is also why it is bounded: `on_start_timeout` defaults to 15 seconds, and a handler that exceeds it loses the call with the reason `handler-start-timeout`. A failure inside it closes as `handler-start-failure`, not `transport-failure`, so a provider outage in your plugin is never reported as StandIn's own socket failing.
+
+### Refusing a call
+
+`session.end()` is safe to call from inside `on_start`. It asks for the close and returns immediately, because awaiting teardown from inside `on_start` would deadlock: teardown waits for `on_start` to return before dispatching your `aclose`.
+
+```python
+async def on_start(self, session: CallSession) -> None:
+    caller = session.start.caller
+    if caller.aad_id not in self.allowlist:
+        await session.end("caller-not-allowed")
+        return
+    self._call = session
+```
+
+Return straight after. Teardown waits, briefly and boundedly, for `on_start` to unwind before it dispatches `aclose`, so anything you build after the refusal still gets closed.
+
+---
+
+## on_caller_audio
+
+```python
+async def on_caller_audio(self, pcm: bytes) -> None:
+    await self._client.append_input(pcm)
+```
+
+One frame of the caller's voice: PCM16, 16 kHz, mono, little-endian. Nominally 20 ms, which is 640 bytes, but the only invariant is an even byte count: measure with `frame_duration_ms(pcm)` rather than counting frames, and never index into a caller frame at a fixed offset. See [Inbound audio](/python-sdk/audio#inbound-audio).
+
+This runs on the receive path of a live call, so it must not block. Hand the bytes to your provider and return. The frame is already validated, so a truncated or malformed payload is dropped by the server and never reaches here.
+
+A live Microsoft Teams call delivers PCM continuously, silence included. If the frames stop, the call is gone on the far side, and the idle watchdog will end it.
+
+---
+
+## on_context
+
+```python
+async def on_context(self, text: str) -> None:
+    await self._agent.add_system_note(text)
+```
+
+Non-interrupting context about the call, already written as a plain sentence ready to put in front of a model. Three things arrive this way:
+
+- participant counts and group-call etiquette, for example `"There are 4 human participants on this call. Stay quiet unless directly addressed."`
+- DTMF key presses, for example `'The caller pressed the "5" key on their keypad.'`
+- recording status changes, for example `"The Microsoft Teams call recording is now ACTIVE."`
+
+It is delivered as it arrives. The server does not queue on your behalf, because what "ready" means is a framework's own business: a framework that cannot accept context before its agent exists should queue it here. The LiveKit plugin does exactly that, because a LiveKit data packet reaches only the participants connected at that instant.
+
+---
+
+## on_goodbye
+
+```python
+async def on_goodbye(self, text: str) -> None:
+    await self._client.interrupt_and_say(text)
+```
+
+StandIn is ending the call and wants this line spoken first.
+
+Interrupt the current turn and say it. The SDK has already told StandIn to drop whatever agent audio it had buffered, so the line plays immediately, and teardown follows within seconds. A goodbye queued behind a long answer is a goodbye the caller never hears.
+
+<Note>
+If your provider guards response creation on "is a response already active", a plain `say` will be swallowed here, because the goodbye almost always arrives mid-answer. Cancel the active response first, then speak.
+</Note>
+
+---
+
+## aclose
+
+```python
+async def aclose(self, reason: str) -> None:
+    await self._client.close()
+```
+
+Release everything this call holds. Always called exactly once, on every path including cancellation, before the slot is freed.
+
+It runs **before** the socket closes, so a handler that wants to say something on the way out still can. `reason` is the first close cause recorded for the call, not the last.
+
+| Reason | Who produced it |
+|---|---|
+| `call-ended` | StandIn sent `session.end`, or nothing named a cause. |
+| `caller-idle-timeout` | The caller-audio idle watchdog: the frames stopped arriving. |
+| `pre-start-timeout` | The socket authenticated and never sent `session.start`. |
+| `handler-start-timeout` | Your `on_start` ran past `on_start_timeout`. |
+| `handler-start-failure` | Your `on_start` raised. |
+| `handler-failure` | Any other handler method raised. |
+| `no-agent-answered` | The stale-call reaper: 120 seconds with nothing having answered the call. |
+| `call-duration-limit` | The call-duration ceiling, **after** `on_goodbye` has already fired and been given its grace. |
+| `agent-ended-call` | The model called the built-in `end_call` tool. |
+| `outbound-no-answer` | An outbound leg rang out. So does `outbound-expired`, when a parked message could not be matched to the call that was placed for it. Both come from [Reaching people](/python-sdk/reaching-people). |
+| `transport-failure` | The socket itself failed. |
+| `server-shutdown` | `server.aclose()`, which ends every live call with this reason rather than waiting for it to finish. |
+
+Anything you pass to `session.end(...)` yourself arrives here too, which is how `caller-not-allowed` in the refusal above reaches your own cleanup.
+
+`call-duration-limit` is the one that needs planning for: by the time it arrives your handler has already been asked to say the goodbye line, so treat `on_goodbye` as the last chance to speak rather than `aclose`.
+
+---
+
+## The optional callbacks
+
+Two more the server duck-types. Most handlers implement neither.
+
+`on_speaker_change(name)` fires when a different person starts speaking, and only when StandIn sends
+unmixed audio. It is called on CHANGE only, never per frame: the name rides every inbound audio frame,
+and a model told forty times a second who is speaking would hear nothing else.
+
+`on_video_frame(frame)` gives you every sampled frame of the caller's camera or screen share. Reach for
+`session.latest_video_frame()` instead when the model only looks on demand.
+
+Neither is on `CallHandler`, which is a runtime-checkable Protocol: a member there would make
+`isinstance(handler, CallHandler)` fail for every handler written before the callback existed, while
+the documented rule says each method is optional. Implementing the method is enough, and inheriting
+from `SpeakerHandler` or `VideoHandler` is never required.
+
+## Barge-in and cancel playback
+
+`cancel_playback()` is the only lever that un-sends audio already handed to the service. It flushes the platform player, so the caller stops hearing the turn they just interrupted.
+
+<Warning>
+Without it, a barge-in stops the **model** but the bot keeps talking for the length of the buffered PCM. The caller hears themselves interrupt and then hears the agent carry on for several seconds, which reads as the agent ignoring them.
+</Warning>
+
+Call it the moment your provider reports that the caller started speaking, and call it **before** you cancel the response upstream. The buffered audio is the part the caller can hear, so it goes first.
+
+```python
+async def on_speech_started(self) -> None:
+    await self._call.cancel_playback()   # first: silence what is already queued
+    await self._client.cancel_response()  # then: stop the model generating more
+    self._aligner.reset()                 # and drop the partial frame of the dead turn
+```
+
+Three things, in that order. `FrameAligner.reset()` matters because the bytes it is holding back belong to the turn the caller just interrupted: flushing them instead would replay a fragment of the abandoned answer after the silence. See [Audio](/python-sdk/audio#reset-on-barge-in).
+
+`cancel_playback()` is cheap and safe to call when nothing is playing. Calling it on every detected speech start is the right default.
+
+---
+
+## A full handler
+
+A realtime speech-to-speech handler, with the resampling, the frame alignment and the barge-in in place. `RealtimeClient` here stands in for whatever provider you use.
+
+```python
+import asyncio
+
+from standin import (
+    REALTIME_SAMPLE_RATE_HZ,
+    SAMPLE_RATE_HZ,
+    CallServer,
+    CallSession,
+    FrameAligner,
+    resample_pcm16,
+)
+
+
+class RealtimeHandler:
+    """One Microsoft Teams call, bridged to one realtime model session."""
+
+    def __init__(self, api_key: str, instructions: str) -> None:
+        # One handler per call, so per-call state is safe on self.
+        self._api_key = api_key
+        self._instructions = instructions
+        self._call: CallSession | None = None
+        self._client: RealtimeClient | None = None
+        # The model speaks 24 kHz and chunks where it likes; the wire wants
+        # whole 640-byte frames at 16 kHz.
+        self._aligner = FrameAligner()
+
+    async def on_start(self, session: CallSession) -> None:
+        caller = session.start.caller
+        # No leading truthiness test on aad_id. Microsoft Teams reports no AAD object id
+        # for guest and anonymous callers, so `if caller.aad_id and ...` would
+        # fail OPEN for exactly the callers you least want to admit.
+        if caller.aad_id not in ALLOWED:
+            # Safe from inside on_start: it asks for the close and returns.
+            await session.end("caller-not-allowed")
+            return
+
+        self._call = session
+        self._client = await RealtimeClient.connect(
+            api_key=self._api_key,
+            instructions=(
+                f"{self._instructions} You are on a Microsoft Teams call "
+                f"with {caller.display_name or 'a caller'}."
+            ),
+            on_audio=self._on_model_audio,
+            on_speech_started=self._on_barge_in,
+            on_turn_done=self._on_turn_done,
+        )
+
+    async def on_caller_audio(self, pcm: bytes) -> None:
+        # Receive path: hand it over and return. Never block here.
+        client = self._client
+        if client is not None:
+            await client.append_input(
+                resample_pcm16(pcm, SAMPLE_RATE_HZ, REALTIME_SAMPLE_RATE_HZ)
+            )
+
+    async def on_context(self, text: str) -> None:
+        client = self._client
+        if client is not None:
+            # Non-interrupting: it informs the next turn, it does not start one.
+            await client.add_context(text)
+
+    async def on_goodbye(self, text: str) -> None:
+        client = self._client
+        if client is not None:
+            # Cancel first, then speak: a plain say is swallowed by a provider
+            # that guards on "is a response already active", and this line
+            # almost always arrives mid-answer.
+            await client.interrupt_and_say(text)
+
+    async def aclose(self, reason: str) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.close()
+
+    # ---- provider callbacks ------------------------------------------------
+
+    async def _on_model_audio(self, pcm_24k: bytes) -> None:
+        call = self._call
+        if call is None:
+            return
+        pcm = resample_pcm16(pcm_24k, REALTIME_SAMPLE_RATE_HZ, SAMPLE_RATE_HZ)
+        # Whole frames only; the remainder is carried, not dropped. Dropping it
+        # clips a few milliseconds off every chunk seam, which is audible.
+        for frame in self._aligner.push(pcm):
+            await call.send_audio(frame)
+
+    async def _on_turn_done(self) -> None:
+        call = self._call
+        tail = self._aligner.flush()  # zero-padded residual
+        if call is not None and tail is not None:
+            await call.send_audio(tail)
+
+    async def _on_barge_in(self) -> None:
+        call = self._call
+        if call is None:
+            return
+        await call.cancel_playback()    # un-send what StandIn still holds
+        if self._client is not None:
+            await self._client.cancel_response()
+        self._aligner.reset()           # the residual belongs to a dead turn
+
+
+async def serve() -> None:
+    server = CallServer(handler_factory=lambda: RealtimeHandler(API_KEY, PROMPT))
+    await server.start()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await server.aclose()
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="CallServer" icon="server" href="/python-sdk/call-server">
+    Every constructor option, and what each one defends against.
+  </Card>
+  <Card title="Audio" icon="waveform" href="/python-sdk/audio">
+    Why the resampler and the aligner are in the SDK rather than in your plugin.
+  </Card>
+</CardGroup>

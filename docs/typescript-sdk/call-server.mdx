@@ -1,0 +1,287 @@
+---
+title: "Call server"
+description: "CallServer options, watchdogs, capacity, draining and teardown in the StandIn TypeScript SDK."
+keywords: ["CallServer", "STANDIN_SECRET", "STANDIN_PORT", "draining", "watchdog", "Microsoft Teams call worker"]
+icon: "server"
+---
+
+`CallServer` answers the socket StandIn dials and hands each call to a
+[handler](/typescript-sdk/call-handler). It is the same server in both SDKs, method for method, and
+behavioural parity is asserted by the shared conformance vectors.
+
+```ts
+import { CallServer } from "@komaa/standin-sdk";
+
+const server = new CallServer({ handlerFactory: () => new MyHandler() });
+await server.start();
+// ... later
+await server.aclose();
+```
+
+## What it owns
+
+Every item below is framework-independent, which is exactly why it lives here and not in a plugin:
+
+- the HMAC handshake, its freshness window and its single-use replay guard
+- capacity, draining, and the one-live-session-per-`callId` rule
+- the frame loop and the wire protocol
+- outbound sequence numbers and the audio timeline, which the video tile is stamped from too
+- [five timers](#the-watchdogs): the pre-start watchdog, the caller-audio idle watchdog, the `onStart`
+  timeout, the stale-call reaper and the optional call-duration ceiling
+- idempotent teardown that always frees the slot
+
+## Options
+
+Every option falls back to an environment variable, then to a default.
+
+| Option | Environment | Default | Meaning |
+|---|---|---|---|
+| `handlerFactory` | none | required | Builds one handler per call. Called with no arguments, so a plugin closes over its own config. |
+| `secret` | `STANDIN_SECRET` | required | The connection secret from the portal. Must byte-match or the handshake is rejected with 401. |
+| `host` | `STANDIN_HOST` | `0.0.0.0` | Bind address. |
+| `port` | `STANDIN_PORT` | `9442` | Port. |
+| `wsPath` | `STANDIN_WS_PATH` | `/msteams/calling` | Path StandIn dials. |
+| `maxConnections` | none | `64` | Concurrent live calls, checked before any crypto runs. |
+| `preStartTimeoutMs` | none | `10000` | How long an authenticated socket may stay silent before it is dropped. |
+| `audioIdleTimeoutMs` | none | `45000` | Time without caller audio before a live call is declared dead. `0` disables. |
+| `onStartTimeoutMs` | none | `15000` | How long `onStart` may take before the call is given up. `0` disables. |
+| `staleCallReaperMs` | none | `120000` | How long a call may run with nothing having answered it. `0` disables. |
+| `maxCallMs` | none | `0` | Hard ceiling on one call, from `session.start`. `0` disables, so there is no ceiling unless you set one. |
+| `goodbyeText` | none | `"We are out of time on this call, so I have to stop here. Goodbye."` | Said through `onGoodbye` before the ceiling ends the call. |
+| `goodbyeGraceMs` | none | `6000` | How long that line is given to finish. |
+| `onCallOutcome` | none | unset | Called with `(callId, outcome)` when StandIn reports how an outbound call ended with nobody answering. Setting it mounts one extra route; see [Health and routes](#health-and-routes). |
+
+The default bind is `0.0.0.0` because a worker usually runs in a container behind an ingress. Bind
+`127.0.0.1` when only a local tunnel should reach the listener. The upgrade is HMAC-authenticated
+either way, so this is defence in depth rather than the authentication itself.
+
+`CallServer` throws a `StandInError` at construction when no secret is available. Starting without
+one would mean either refusing every call or accepting anything, and neither is a decision a library
+should make quietly.
+
+<Warning>
+`maxCallMs` is the only per-call cost ceiling in the SDK, and it is **off** by default. Nothing else
+ends a call that is still going: the idle watchdog is satisfied while the caller keeps talking, and a
+provider billed by the minute keeps billing. Set it on any deployment that pays per minute.
+</Warning>
+
+<Note>
+**The units differ between the SDKs, and the names differ with them.** TypeScript takes milliseconds
+(`preStartTimeoutMs`, `maxCallMs`, `goodbyeGraceMs`, `staleCallReaperMs`); Python takes seconds
+(`pre_start_timeout`, `max_call_seconds`, `goodbye_grace`, `stale_call_reaper_seconds`). There is no
+`maxCallSeconds` in this SDK. The compiler catches a straight port; a configuration file copied
+between a Python worker and a TypeScript one does not, and `45` where `45000` was meant disables
+nothing, it just ends every call in 45 milliseconds.
+</Note>
+
+## Properties and lifecycle
+
+| Member | Purpose |
+|---|---|
+| `await start()` | Bind the listener. Transactional: either it is listening when this resolves, or nothing of it survives. Throws if it is already running. |
+| `await aclose()` | Stop the reaper, close every live call with `server-shutdown`, then stop listening. Awaits the calls' real teardown rather than their close promises. |
+| `draining` | Set `true` to refuse new calls with 503 while live ones continue. |
+| `activeCalls` | Live call count. |
+| `running` | Whether the listener is actually bound. |
+| `host` | The interface the listener is bound to, or will be. |
+| `port` | The bound port, resolved after `start()` when you passed `0`. |
+| `wsPath` | The normalized path, always with a leading slash and no trailing one. |
+
+`running` exists because a host that calls connect twice binds a second listener and leaks the first,
+and without it there is no way to ask whether the bind succeeded, so a dead worker reports itself as
+connected.
+
+`aclose()` ends live calls rather than waiting for them, so a graceful restart is `draining` first
+and `aclose()` after. It waits for real teardown rather than returning on an in-flight closer,
+because a close that early-returns lets the process exit with teardown still pending, leaking
+sessions.
+
+The seven timing and goodbye members (`preStartTimeoutMs`, `audioIdleTimeoutMs`, `onStartTimeoutMs`,
+`maxCallMs`, `goodbyeText`, `goodbyeGraceMs`, `staleCallReaperMs`) are readable but `readonly`: set
+them in the constructor. Six of the seven are plain public attributes in Python, assignable after
+construction, and `pre_start_timeout` is private there as it is here. So a Python worker that retunes
+`audio_idle_timeout` on a running server has no equivalent move in TypeScript, which is one of the
+few places the two SDKs genuinely differ.
+
+## Health and routes
+
+The listener answers `GET /healthz` with `{"ok": true, "calls": <n>}`.
+
+One more route exists, and only if you asked for it. Set `onCallOutcome` and the server mounts
+`POST <wsPath>/outcome/<callId>`; leave it unset and that path is a 404 like everything else, so a
+worker that never places a call opens no extra surface. That is the point of it being optional rather
+than always on.
+
+It sits **under** `wsPath`, so the `/msteams/calling` mount you already have covers it and there is no
+second route to publish. See [Expose your agent](/expose#mount-the-call-path).
+
+When it is mounted:
+
+- it is signed with the **v2** request signature over the method, path and a hash of the body, and
+  verified inside the same 60 second window as the handshake
+- the body is read and capped at 8 KB **before** the signature is checked, because v2 signs a hash of
+  the body and there is nothing to verify until the bytes are in hand. The cap is what stops that
+  being a way to make the worker read an unbounded request from an unauthenticated peer
+- over the cap is 413, a bad signature or a stale timestamp is 401, and a good one is 204
+
+Your callback throwing is logged and still acknowledged, because a plugin that fails to handle an
+outcome must not make StandIn retry it forever.
+
+Everything else that is not the WebSocket path is a 404.
+
+## Draining
+
+A clean rolling restart is two steps: set `draining`, then wait for `activeCalls` to reach zero.
+
+```ts
+process.once("SIGTERM", async () => {
+  server.draining = true;                   // new calls get 503; live calls continue
+  while (server.activeCalls > 0) {
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  await server.aclose();
+});
+```
+
+## Admission order
+
+The upgrade is checked in this order, and the order matters:
+
+1. **Path.** Anything outside `<wsPath>/` is 404. A malformed URL or percent escape is 400 rather
+   than an exception, because this runs before authentication and must never take the process down.
+2. **Draining.** 503, so a worker winding down does not accept calls it will never serve.
+3. **Capacity.** 503 at `maxConnections`, checked **before any crypto**, so a flood cannot make the
+   worker spend CPU on signatures for calls it was never going to accept.
+4. **Signature.** 401 unless the HMAC verifies inside the 60 second window.
+5. **Replay.** 401 when that exact handshake has already been used once.
+6. **Duplicate call.** 409 when that `callId` already has a live session.
+
+## The watchdogs
+
+Five timers can end a call. Three bound a call that has not started properly, one bounds a call
+nothing ever answered, and one bounds a call that is going perfectly well and will not stop.
+
+<AccordionGroup>
+
+<Accordion title="Pre-start: an authenticated socket that never speaks">
+A socket that authenticates and then sends nothing holds a call slot. After `preStartTimeoutMs` the
+call is closed with `pre-start-timeout`.
+</Accordion>
+
+<Accordion title="Audio idle: the far side went away quietly">
+A live Microsoft Teams call delivers PCM continuously, because silence is still frames. Audio going quiet for
+`audioIdleTimeoutMs` therefore means the call is gone and nobody said so. That happens: the peer keeps
+the socket open, and even keeps pinging, while its own teardown is wedged. The call closes with
+`caller-idle-timeout`.
+
+The watchdog is armed **before** `onStart`, not after. While `onStart` is awaited the frame loop is
+queued behind it, so `session.end` is never read. Armed after, a hung `onStart` would have no watchdog
+at all and the `callId` would 409 forever, leaking one slot per inbound call.
+</Accordion>
+
+<Accordion title="onStart timeout: a provider that will not connect">
+`onStart` does real network work and holds the frame loop. After `onStartTimeoutMs` the call closes
+with `handler-start-timeout`, separately from `handler-start-failure`, so a third-party outage inside
+a plugin is not reported to StandIn as StandIn's own socket failing. Sending both sides to debug the
+wrong system is its own kind of outage.
+</Accordion>
+
+<Accordion title="Stale-call reaper: nothing ever answered">
+The gap none of the other three cover. `session.start` arrived, so the pre-start watchdog is
+satisfied. `onStart` returned, so its timeout is satisfied. The caller is still talking, so the idle
+watchdog is satisfied. And yet no agent is on the call: an agent dispatch that never landed is the
+commonest misconfiguration there is, and the caller sits listening to nothing.
+
+The reaper ends such a call after `staleCallReaperMs`, 120 seconds by default, with the reason
+`no-agent-answered`. It is on by default because it spends nothing and only frees what is already
+lost.
+
+A call counts as answered the moment the handler sends audio. A plugin that joins a room and only
+listens sends none, so it must say so itself:
+
+```ts
+session.markAnswered();
+```
+
+Call it when your agent's own audio track appears, not when a participant connects: monitors,
+recorders and avatar workers all connect, and none of them is an agent answering. `session.answered`
+tells you whether anything has.
+</Accordion>
+
+<Accordion title="Duration ceiling: a call that will not end">
+Off unless you set `maxCallMs`. A caller who will not hang up, a model looping at itself, an
+automated system that dialled and never stopped talking: none of them trips a silence check, and all
+of them bill by the minute for as long as the socket lives.
+
+On the limit the server flushes playback first, then delivers `goodbyeText` through your handler's
+`onGoodbye`, waits `goodbyeGraceMs`, and closes with `call-duration-limit`. The goodbye goes through
+the same callback StandIn's own closing line uses, so a plugin needs no new code to honour it, and
+the grace is bounded whatever the handler does with it: a plugin that hangs in `onGoodbye` must not
+turn a time-limited call into an endless one.
+</Accordion>
+
+</AccordionGroup>
+
+## Teardown
+
+Teardown is idempotent and the **first** reason wins, because a cascade of close causes must not
+overwrite the one that actually ended the call. Every caller awaits the same promise.
+
+The order is fixed: cancel the watchdogs, wait for an in-flight `onStart` to unwind (bounded), dispatch
+your `aclose`, write the advisory `session.end`, close the socket with a 2 second bound, then release
+the slot unconditionally. The release is in a `finally`, so whatever failed above, the `callId` becomes
+usable again.
+
+## Logging
+
+The SDK logs to the console by default, because a library that silently swallows "this worker takes no
+Microsoft Teams calls" is a library people debug for an hour. Route it into your own logger:
+
+```ts
+import { setLogger } from "@komaa/standin-sdk";
+
+setLogger({
+  debug: (m) => myLogger.debug(m),
+  info: (m) => myLogger.info(m),
+  warn: (m) => myLogger.warn(m),
+  error: (m) => myLogger.error(m),
+});
+```
+
+<Note>
+This is the one place the two SDKs differ on logging. Python has a standard library logging tree to
+hang on, so it logs through the logger named `standin` and has no `set_logger` at all; TypeScript has
+no such tree, so it exports this function instead.
+</Note>
+
+Ids that appear in logs are rendered log-safe first: control characters are replaced and length is
+bounded, so a crafted `callId` cannot forge a log line.
+
+## Limits
+
+A single inbound message is bounded at 2 MB, matching the Python SDK. Outbound agent audio is dropped
+rather than queued past 1 MB of unflushed socket buffer (`MAX_AUDIO_BUFFER_BYTES`), because a wedged
+peer turns "send everything" into an unbounded queue. Control frames are never shed: a call that
+cannot be ended is the failure that shedding exists to prevent.
+
+Frame types the SDK does not know are ignored by contract, so an older plugin and a newer StandIn
+interoperate rather than failing. The honest example is a frame type added to the protocol after your
+plugin was published: the avatar and vision frames are **not** an example, because this SDK sends and
+parses them. See [Vision and the avatar](/typescript-sdk/vision).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Call handler" icon="plug" href="/typescript-sdk/call-handler">
+    The seven methods, the session object, and how to refuse a call.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/typescript-sdk/configuration">
+    Every `STANDIN_` variable the SDK reads, and what reads it.
+  </Card>
+  <Card title="Checking the install" icon="stethoscope" href="/typescript-sdk/checking-the-install">
+    Ring your own handler on loopback before anyone places a real call.
+  </Card>
+  <Card title="Security" icon="shield" href="/typescript-sdk/security">
+    The HMAC lanes, the replay guard, and who may call the agent.
+  </Card>
+</CardGroup>

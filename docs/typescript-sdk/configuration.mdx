@@ -1,0 +1,240 @@
+---
+title: "Configuration"
+description: "Every STANDIN_ variable the SDK reads, the helpers for reading your own, and how a missing optional peer surfaces, in the StandIn TypeScript SDK."
+keywords: ["STANDIN_SECRET", "STANDIN_CHAT_SECRET", "STANDIN_MEDIA_ROOTS", "vendorHost", "optional peer dependency", "voice agent environment variables"]
+icon: "sliders"
+---
+
+Everything the SDK reads from the environment is listed here, and nothing else in the package reads a
+`STANDIN_` variable. Every one of them can be overridden in code, because a constructor option always
+beats an environment value.
+
+## Every variable the SDK reads
+
+| Variable | Default | What reads it, and what it does |
+|---|---|---|
+| `STANDIN_SECRET` | none | Your StandIn connection secret. `CallServer`, `ChatChannel` and `OutboundCaller` all refuse to construct without one. |
+| `STANDIN_CHAT_SECRET` | falls back to `STANDIN_SECRET` | The key the chat lane signs with, read before `STANDIN_SECRET`. A managed deployment issues a separate key for chat; with one key for both lanes, leave this unset. |
+| `STANDIN_HOST` | `0.0.0.0` | Bind address for the call listener. |
+| `STANDIN_PORT` | `9442` | Port for the call listener. |
+| `STANDIN_WS_PATH` | `/msteams/calling` | The path StandIn dials on your worker. |
+| `STANDIN_CHAT_URL` | `wss://teams.standin.komaa.com/api/chat/channel` | The chat lane endpoint. Also the origin an inbound attachment may be fetched from, derived from this rather than configured twice. |
+| `STANDIN_WORKER_URL` | none | The StandIn control address `OutboundCaller` posts to, which StandIn gives you with your connection secret. Outbound calling is unavailable until it is set, and a value that is not http or https, has no host, or carries credentials is refused when the caller is built rather than when somebody tries to ring. |
+| `STANDIN_OUTBOUND_ALLOW` | empty, meaning off | Comma-separated directory ids this agent may ring, read by `OutboundPolicy.fromEnv()`. |
+| `STANDIN_OUTBOUND_MAX_PER_HOUR` | `6` | Outbound calls allowed in any rolling hour, across all targets. Zero means **no cap**, not "no calls", so do not reach for it to turn outbound off: leave `STANDIN_OUTBOUND_ALLOW` unset for that. |
+| `STANDIN_TENANT_ID` | none | Which organisation `VoiceDelivery` places calls into. Operator configuration only: never the message, the metadata, the model or the caller. Exported as `TENANT_ENV`. |
+| `STANDIN_STATE_DIR` | `~/.standin/state` | Where parked outbound messages are kept, created owner-only. |
+| `STANDIN_MEDIA_ROOTS` | empty, meaning off | Directories a `MEDIA:` marker may read a local file from. Exported as `MEDIA_ROOTS_ENV`. |
+| `STANDIN_VISION_API_URL` | none | The full chat-completions URL `FrameDescriber` posts a frame to, so a voice model can be asked what it is looking at. It is used exactly as written, not as a base to append a path to. |
+| `STANDIN_VISION_MODEL` | none | The model name for that endpoint. `FrameDescriber.fromEnv()` returns `undefined` unless both this and the URL are set, and that `undefined` is the signal a plugin uses to tell an agent that looking is unavailable here. |
+| `STANDIN_VISION_API_KEY` | none | Sent to that endpoint as a bearer token when set. A local endpoint usually needs none. |
+
+Two of these names are exported as constants rather than written out, so your code and the SDK cannot
+drift apart:
+
+```ts
+import { MEDIA_ROOTS_ENV, TENANT_ENV } from "@komaa/standin-sdk";
+```
+
+Provider credentials are not in this table. Each plugin reads its own vendor prefix, `OPENAI_`,
+`ELEVENLABS_`, `DEEPGRAM_`, `CARTESIA_` or `LIVEKIT_`, and each plugin page lists its own. That split
+is deliberate: a `STANDIN_` variable configures your worker, never the provider you chose to answer
+calls with. The three `STANDIN_VISION_` variables sit on the line because the endpoint they name is
+yours to pick, so keep in mind that `STANDIN_VISION_API_KEY` is a credential and belongs wherever the
+rest of your secrets live.
+
+<Note>
+The Python SDK reads the same fifteen, plus one this SDK has no use for. `STANDIN_SHOW_ROOTS` fences
+the document renderer that Python ships and TypeScript does not, so do not go looking for it here.
+See [Configuration](/python-sdk/configuration) for that side.
+</Note>
+
+## How a value is read
+
+The rule is the same everywhere: an explicit option wins, then the environment, then the documented
+default.
+
+```ts
+// secret: the option, else STANDIN_SECRET, else refuse to start
+const server = new CallServer({ handlerFactory, secret: fromYourVault });
+```
+
+Prefer the option whenever the value already exists somewhere better, such as a platform secret store
+or a host that resolved it for you. An environment variable that silently overrides a value an
+operator can actually see in a portal is a bad day waiting to happen.
+
+Three specifics are worth knowing before they cost you an afternoon:
+
+<AccordionGroup>
+
+<Accordion title="A blank STANDIN_CHAT_SECRET does not fall through">
+`ChatChannel` reads the option, then `STANDIN_CHAT_SECRET`, then `STANDIN_SECRET`. That chain stops at
+the first value that is **present**, and an exported empty string is present. So
+`export STANDIN_CHAT_SECRET=` shadows a perfectly good `STANDIN_SECRET` and the channel throws at
+construction instead. Unset the variable rather than blanking it.
+</Accordion>
+
+<Accordion title="STANDIN_PORT is coerced, not validated">
+The port is read as `Number(process.env.STANDIN_PORT ?? 9442)`. A value that is not a number becomes
+`NaN` rather than an error naming the variable, and you find out at `start()`. If you templated that
+value from somewhere, check it before you pass it.
+</Accordion>
+
+<Accordion title="An empty STANDIN_WS_PATH throws, and that is on purpose">
+The path is trimmed and its slashes normalized, and a path that reduces to `/` is refused with
+`wsPath must be a real path such as /msteams/calling`. A worker listening at the root would answer
+anything that reached it, so this fails at construction rather than at the first call.
+</Accordion>
+
+</AccordionGroup>
+
+## Reading your own configuration
+
+Every plugin needs the same things: a value that must be set, one that may be, a boolean, a check that
+a vendor host is really that vendor's, and a header map. When each plugin wrote its own, the error a
+user saw for a missing key depended on which provider they happened to pick. These five helpers are the
+shared version.
+
+```ts
+import { flag, jsonObject, optional, required, vendorHost } from "@komaa/standin-sdk";
+```
+
+| Helper | Signature | Behaviour |
+|---|---|---|
+| `required` | `(name, purpose = "") => string` | Throws `StandInError` naming the variable when it is unset or blank. |
+| `optional` | `(name, fallback?) => string \| undefined` | Blank reads as absent, so an exported empty value takes the fallback. |
+| `flag` | `(name, fallback = false) => boolean` | Only the exact string `true` is true. |
+| `vendorHost` | `(name, fallback, suffix) => string` | Throws unless the host is the bare suffix or ends with it. |
+| `jsonObject` | `(name) => Record<string, string>` | Parses a JSON object and coerces every value to a string. Blank is an empty object; a JSON array or number throws. |
+
+`purpose` completes the sentence "X is required to ...", so write it as a verb phrase and the message
+reads properly:
+
+```ts
+const key = required("ACME_API_KEY", "answer calls with Acme");
+// ACME_API_KEY is required to answer calls with Acme
+```
+
+**`flag` is strict on purpose.** The value is trimmed and lowercased, then compared to the single word
+`true`, so `TRUE` and `True` work and `1`, `yes`, `on` and `y` are all false. Most flags worth having
+turn a guard **off**, and a guard must not be disabled by a plausible-looking typo landing in a config
+file. A reader who wanted it on and typed `1` gets the safe direction and a behaviour they will
+notice, not a guard quietly removed. An unset variable is not a typo, so it returns the fallback
+untouched rather than being forced to false.
+
+**`vendorHost` is the one worth reading twice.** Your API key travels to whatever host the
+configuration names, so a mistyped or injected host is not a failed call, it is credential
+exfiltration. That is why it throws rather than warning:
+
+```ts
+const host = vendorHost("ACME_API_HOST", "api.acme.com", ".acme.com");
+// "acme.com" passes, "eu.acme.com" passes, "api.acme.com.evil.test" throws
+```
+
+The host is accepted when it equals the suffix with its leading dot stripped, or when it ends with the
+suffix exactly as you passed it.
+
+<Warning>
+Pass the suffix **with** its leading dot. `".acme.com"` accepts `api.acme.com` and rejects
+`evilacme.com`; `"acme.com"` accepts both, because `evilacme.com` ends with it. That is a guard that
+reads as present and is not.
+</Warning>
+
+**`jsonObject` never logs the value it rejected.** It is used for header maps, and a header map
+carries **your** credentials to somebody else's endpoint. The error says the variable must be a JSON
+object and stops there.
+
+<Note>
+These five live at the package barrel in TypeScript, so `import { required } from "@komaa/standin-sdk"`
+is the whole import. The Python SDK does **not** re-export them: they are `standin.config.required`,
+`standin.config.optional`, `standin.config.flag`, `standin.config.vendor_host` and
+`standin.config.json_object`, imported as `from standin.config import required`. Same behaviour, same
+argument order, different import line.
+</Note>
+
+## Optional peer dependencies
+
+The core installs with one runtime dependency, `ws`, and needs Node 20 or newer. That floor is the
+**core's** floor, not the highest any plugin wants, so a plugin that needs more says so on its own
+page. Everything else this package can reach is an optional peer, which is what lets one package ship
+every plugin: the core imports nothing from `plugins/`, so the bare specifier works on a machine with
+no framework installed at all.
+
+```ts
+import { CallServer } from "@komaa/standin-sdk";  // no peer needed
+```
+
+| Peer | Reached by | What its absence does |
+|---|---|---|
+| `@livekit/rtc-node` | `@komaa/standin-sdk/livekit` | `StandInError`, naming both packages and the `npm install` that fixes it. |
+| `livekit-server-sdk` | `@komaa/standin-sdk/livekit` | The same error: the plugin needs both, so it loads both together. |
+| `openclaw` | `@komaa/standin-sdk/openclaw` | A bare module-not-found, untranslated: this is the one static import of a peer in the package. The case does not arise, because OpenClaw loads the plugin inside its own process, so the host is always already there. |
+| `sharp` | the avatar tile relay | A warning, the relay off, and audio unaffected. Frames cannot be encoded, but nothing about the call breaks. |
+
+### How a missing one surfaces
+
+LiveKit is loaded at **use** time rather than at module load, so importing the plugin on a machine
+without LiveKit still succeeds and the failure, when it comes, arrives translated:
+
+```text
+the livekit plugin needs @livekit/rtc-node and livekit-server-sdk:
+run `npm install @livekit/rtc-node livekit-server-sdk`
+```
+
+That translation is the point. A reader who gets `Cannot find module '@livekit/rtc-node'` thrown out
+of somebody else's package cannot tell a missing optional dependency from a broken install, and will
+go looking in the wrong place. Naming the install line ends it in one line.
+
+`sharp` is the other shape. It is looked for, and when it is not there the SDK warns and carries on:
+
+```text
+standin: the avatar tile relay needs sharp to encode frames (npm install sharp);
+the relay is off and audio is unaffected
+```
+
+The rule behind the difference is that a missing peer throws when it makes a feature impossible and
+warns when it makes an **optional** feature unavailable. Supply your own `encoder` on
+`TileStreamOptions` and `sharp` is never looked for at all.
+
+<Warning>
+This SDK has no dedicated exception for a missing peer, and `StandInError` is narrower than its name
+suggests. It covers configuration and the wire: the constructors that refuse to start, the five
+helpers above, `parseInbound`, and the LiveKit peer message, with `OutboundError` extending it for the
+outbound lane. It does **not** cover everything the SDK throws. The picture, media and fetch helpers,
+`outboundImage` and `loadMedia` among them, throw a plain `Error`, so an `instanceof StandInError`
+filter silently drops those. Catch `Error` and narrow inside it.
+
+The Python SDK does have a dedicated one, `standin.PluginNotInstalled`, which subclasses both
+`StandInError` and `ImportError` so that `except ImportError` and `importlib.util.find_spec` keep
+working. Do not port a `catch (PluginNotInstalled)` from Python code: there is nothing here by that
+name.
+</Warning>
+
+The two SDKs also do not have the same optional set, because the frameworks are not the same in each
+language. TypeScript needs two LiveKit packages and uses `sharp` to encode tile frames. Python reaches
+LiveKit through one extra, `standin-sdk[livekit]`, encodes the same frames with Pillow from
+`standin-sdk[tile]`, and carries a `render` extra for the document renderer that has no counterpart
+here. Read the peers of the SDK you are installing, not the other one's.
+
+## Version
+
+```ts
+import { SCHEMA_VERSION, VERSION } from "@komaa/standin-sdk";
+```
+
+Two numbers, and a bug report wants both. `VERSION` is this package's own version, the same string the
+Python twin exposes as `standin.__version__`. `SCHEMA_VERSION` is the chat wire schema, versioned
+separately and bumped only for a breaking change, because the schema already requires a receiver to
+ignore fields it does not know. Knowing both is what separates "your worker is old" from "the message
+was wrong".
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="CallServer" icon="server" href="/typescript-sdk/call-server">
+    The listener most of these variables configure.
+  </Card>
+  <Card title="Checking the install" icon="stethoscope" href="/typescript-sdk/checking-the-install">
+    Prove the configuration is right before a real call does.
+  </Card>
+</CardGroup>

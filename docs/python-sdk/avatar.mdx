@@ -1,0 +1,279 @@
+---
+title: "The avatar"
+description: "Expressions, the viseme timeline that drives lip-sync, and putting your own video on the bot's tile, in the StandIn Python SDK."
+keywords: ["avatar lip sync Microsoft Teams", "viseme speech marks", "ExpressionCue infer_emotion", "TurnLipSync estimate_visemes", "avatar tile video relay"]
+icon: "face-smile"
+---
+
+StandIn renders the avatar tile. Your worker does not draw it, stream it, or know how it is made. It sends hints, and the service does the rest.
+
+## Two hints and one stream
+
+There are two hints. One names the emotion the face should wear, the other carries the viseme timeline for an utterance, which is what makes the mouth match the words:
+
+```python
+await session.express("happy")
+await session.send_speech_marks([(0, 12), (200, 4), (400, 14), (800, 8)])
+```
+
+Everything here is **additive and best-effort**. An unknown emotion renders as neutral, a service that does not implement one of these ignores it, and nothing on this page changes a single sample of the audio the caller hears. That is the whole reason it is safe to send: the worst case is a neutral face over an unchanged voice, which is exactly what the caller would have got had you sent nothing at all.
+
+Neither hint needs a provider that offers it. The emotion can be read straight out of the reply text with no extra model call, and the timeline can be built for a provider that returns no timings whatsoever. Those two are the bulk of this page.
+
+Then there is the stream, for the minority of workers that already produce video of their own: `TileStream` puts that on the tile in place of the rendered avatar. It is the one thing here that is continuous rather than a hint, and the last section is mostly about not letting it hurt the voice.
+
+## The emotion the face wears
+
+```python
+from standin import EMOTIONS, expression
+
+EMOTIONS  # ("neutral", "happy", "sad", "surprised", "thinking")
+```
+
+`EMOTIONS` is an **open set**, not a validation list. Sending something outside it is allowed and renders as neutral, which is what lets a newer sender and an older service keep interoperating instead of one of them refusing the other's vocabulary.
+
+`session.express(emotion)` is what a handler calls. `expression(emotion)` is the message builder underneath it, exported for a plugin that assembles its own wire messages.
+
+```python
+from standin import MAX_EMOTION_CHARS
+
+MAX_EMOTION_CHARS  # 40
+```
+
+`expression()` raises `ValueError` on an empty emotion or one longer than `MAX_EMOTION_CHARS`. Everything in between is the service's to interpret.
+
+The cap is applied **where the message is built**, not at the edge of some plugin, and that placement is the point. An emotion reaches the avatar tile, and the string usually came from a model that whoever is on the call is steering: a tool argument, a token off a transcript. Bounding it at the builder means `session.express` is bounded, every plugin's own `express` tool is bounded, and no future one can forget to do it.
+
+## Emotion with no extra model call
+
+An extra inference per sentence is not something a live call can pay for. `infer_emotion` reads the emotion out of the reply text instead, with no model call and no added latency:
+
+```python
+from standin import infer_emotion
+
+infer_emotion("Congratulations, that is excellent")  # "happy"
+infer_emotion("Sorry, that is great news")           # "sad"
+infer_emotion("They did what??")                     # "surprised"
+infer_emotion("the meeting is at four")              # "neutral"
+```
+
+It returns `surprised`, `sad`, `happy` or `neutral`, ready to hand to `expression()`. First match wins in that order rather than a score being totalled: a startled "wow" must not be averaged away by a polite "thanks", and an apology must not be masked by an incidental "nice".
+
+`ExpressionCue` decides **when** one is worth sending, which is the harder half. Ask it on every assistant transcript, partial and final alike, and send whatever comes back:
+
+```python
+from standin import ExpressionCue
+
+cues = ExpressionCue()
+
+
+async def on_transcript(text: str, is_final: bool) -> None:
+    emotion = cues.cue(text)
+    if emotion:
+        await session.express(emotion)
+```
+
+Two things are happening there. It **re-reads the emotion on every chunk**, so the face self-corrects as the rest of a sentence arrives: "let me check that" cues neutral, and "let me check that, no way!!" cues surprised a moment later. And it **returns `None` when nothing changed**, which is what stops a partial-per-word stream from sending dozens of identical messages for one sentence. Waiting for the final transcript instead would land the cue as the sentence ends, with the face stale for the entire time a happy or apologetic reply was being spoken.
+
+One instance per call. What it remembers is the last emotion that call was told to wear, readable as `cues.last_sent`.
+
+While a tool keeps the caller waiting, hold a thinking face:
+
+```python
+async def run_tool(name: str) -> str:
+    emotion = cues.thinking(True)
+    if emotion:
+        await session.express(emotion)
+    try:
+        return await tools.run(name)
+    finally:
+        emotion = cues.thinking(False)
+        if emotion:
+            await session.express(emotion)
+```
+
+While thinking is on, `cue()` returns `None` for everything: without that suppression a transcript chunk arriving mid-tool makes the avatar look finished while it is still working. Only a transition acts, so setting the same state twice sends nothing and a retry around the tool is harmless. Leaving sends `neutral` when thinking is still the last thing the call was told to wear, because the model may say nothing at all after a tool result, and with no transcript to re-infer from the face would stick mid-thought for the rest of the call. Call it from a `finally` so a tool that raised still leaves the face behind it.
+
+<Warning>
+  The lexicon is **English only**, and that is a decision rather than an oversight. An Arabic reply, or a reply in any other language, infers `neutral`. Neutral is always a safe face, and a silent guess at the language would put a confident wrong one on the tile.
+
+  Note the asymmetry before you go looking for a bug that is not there: the viseme table in the next sections **is** bilingual. The mouth moves on an Arabic reply. The face stays neutral.
+</Warning>
+
+## The viseme timeline
+
+```python
+from standin import SpeechMark
+
+SpeechMark  # tuple[int, int]: (t_ms, viseme_id)
+```
+
+One mark is milliseconds from the start of the utterance, and which mouth shape to hold. `t_ms` counts from the start of **that turn's audio**, never from the moment the message reaches the service.
+
+<Note>
+  This is the one place the two SDKs differ in shape. A mark is a **tuple** here, `tuple[int, int]`, and an **object** in TypeScript, where the same timeline is written `[{ tMs: 0, visemeId: 12 }, { tMs: 200, visemeId: 4 }]`. Everything else matches: the same ids, the same ordering rules, the same wire payload. Porting a plugin across rewrites the mark literals and nothing else.
+</Note>
+
+`session.send_speech_marks(marks)` sends the timeline for one utterance. `speech_marks(marks)` is the builder underneath, again exported for a plugin assembling its own wire messages.
+
+```python
+from standin import MAX_VISEME_ID
+
+MAX_VISEME_ID  # 21
+```
+
+Visemes use the Azure Speech numbering, 0 to 21, which is what the avatar expects. The builder **sorts the marks ascending and drops anything outside that range**, along with any mark timed before zero, rather than passing it on. The avatar reads the timeline in order, so a mark out of sequence or a shape it cannot render does not cost one frame: it desynchronises the mouth for the rest of the utterance.
+
+## Measured beats still, guessed loses to still
+
+This is the rule that decides whether to send a timeline at all, and it is worth getting right before writing any of the code below.
+
+Send a timeline whenever it is spread over a duration you **measured**: the audio your worker actually sent for that turn, or real per-character timings from the speech provider. That is better than a still mouth, and on a realtime path it is the difference between an avatar that talks and one that never opens its mouth at all.
+
+Do not send a timeline spread over a duration **guessed** from text length or a words-per-minute rate. That is worse than sending nothing. The error in a guess compounds sentence after sentence, so the mouth drifts further from the voice the longer the call runs, and a mouth moving against the voice reads as broken in a way a still mouth never does.
+
+The distinction is the **duration**, not the phonemes. The mouth shapes are approximate either way.
+
+## A timeline from the text and the audio you sent
+
+Every realtime speech-to-speech model streams voice and hands back no phoneme timings, so there is nothing for `send_speech_marks` to carry and the mouth never moves on the default path. `TurnLipSync` closes that gap the one honest way open to a worker: it counts the audio the turn actually sent, byte by byte, and spreads the text over that measured length.
+
+```python
+from standin import TurnLipSync
+
+lipsync = TurnLipSync()
+
+async for chunk in model_audio:            # the audio sink
+    await session.send_audio(chunk)
+    lipsync.audio_sent(chunk)
+
+
+async def on_transcript(text: str, is_final: bool) -> None:
+    if is_final:                           # once per turn, never on a partial
+        marks = lipsync.finish(text)
+        if marks:
+            await session.send_speech_marks(marks)
+
+
+async def on_barge_in() -> None:
+    lipsync.cancel()
+```
+
+`audio_sent(pcm)` takes a PCM16 mono buffer. The constructor's `sample_rate_hz` defaults to the wire's own 16 kHz, which is what a plugin sending frames to the call is holding; pass the real rate when your sink counts at another one, as in `TurnLipSync(sample_rate_hz=24_000)`. It is keyword only, so there is no positional form to get wrong. For a sink that hands over encoded audio, `audio_sent_ms(ms)` adds a duration directly, and it ignores a chunk that measures as zero, as negative, or as no number at all rather than taking the turn's count with it. Each chunk is rounded as it is added rather than kept as a running float, so both SDKs accumulate the same integer for the same stream of chunks.
+
+`finish(text)` returns the timeline and resets the counter, so the next turn starts from zero. It returns an empty list when no audio was sent or the text carries no mouth shape, and you send nothing in that case. Emit once per turn, on the final transcript: a partial would send an ever-lengthening timeline several times over and the avatar would restart the mouth mid-sentence.
+
+<Warning>
+  `cancel()` is not optional. On a barge-in the service drops audio the caller never heard, and a counter that keeps those milliseconds spreads the next turn's text over its own audio **plus the discarded audio**. The mouth runs long for the whole of that turn and every turn after it. Call it wherever you call [`cancel_playback()`](/python-sdk/call-handler#barge-in-and-cancel-playback).
+</Warning>
+
+Underneath it, and usable on their own:
+
+| Name | What it is |
+|---|---|
+| `estimate_visemes(text, duration_ms)` | The spread itself. Returns `(t_ms, viseme_id)` marks, strictly increasing. |
+| `viseme_for_char(ch)` | The mouth shape a character wears, or `None`. |
+| `CHAR_VISEMES` | The character to shape map, read-only. |
+| `SILENCE_VISEME` | `0`, a closed mouth, and what the space between two words becomes. |
+
+`estimate_visemes` returns an empty list rather than raising on anything it cannot use: no text, a duration that is zero, negative, infinite or not a number, or text with no mouth shape in it at all. `"3.5%"` is the last case, and an empty answer is the right one: mapping digits and punctuation to silence instead would punch a hole of closed-mouth frames into the middle of a spoken number. Only a space becomes silence. A run of one shape is one mark, timed at the first character of the run, because "mmm" is one mouth position and a mark per character would multiply the payload for an identical rendering.
+
+Times come back strictly increasing, and that is not cosmetic either. Spread a long sentence over a very short buffer and the step falls below half a millisecond, so neighbouring marks round onto the same one. The later shape wins, because a shape held for zero milliseconds is not renderable, and because `speech_marks` re-sorts by `(t_ms, viseme_id)` and would otherwise hand the avatar a different winner than the one the walk ended on.
+
+`CHAR_VISEMES` covers **all 26 Latin letters and all 28 Arabic letters** in one map, with the eight Arabic variant forms and the three short vowels alongside them. That is not a nice-to-have. Without the Arabic rows an Arabic reply produces no tokens, carries no timeline, and the mouth simply does not move for half the people who will be on these calls. The stretch and doubling marks are deliberately absent, because they carry no mouth shape of their own and mapping them would insert mouth changes nobody spoke.
+
+`viseme_for_char` lowercases and looks the character up as written, with **no Unicode normalization at all**. Folding presentation forms onto their base letter would change which characters map, and the two SDKs would then disagree about the same string.
+
+The map is read-only and a write to it raises. Both SDKs agree on it byte for byte, and a caller that could mutate it would make one call's mouth disagree with every other call's.
+
+## Real timings when your provider has them
+
+When the speech provider returns per-character timings, use them. They are strictly better than an estimate and they cost nothing, since the synthesis call already produced them:
+
+```python
+from standin import estimate_visemes, visemes_from_alignment
+
+marks = visemes_from_alignment(result.characters, result.character_start_times_seconds)
+if not marks:
+    marks = estimate_visemes(text, lipsync.duration_ms)
+```
+
+Core takes two plain sequences: the characters as the provider spoke them, and when each one starts in seconds. Normalising a vendor's field names is the speech plugin's job, not this function's.
+
+It is deliberately forgiving of the shapes providers actually return. Ragged sequences are walked to the shorter of the two, a timing that is not a finite number costs its own mark and nothing else, and a time before the start of the utterance is clamped to zero. Providers do return mismatched lengths and bare `NaN` values, and throwing there would lose the turn over a cosmetic hint.
+
+Fall back to `estimate_visemes` on an **empty result**, as above, rather than on a missing alignment. A provider that returned timings for punctuation only has an alignment and still needs the estimate.
+
+## When to send the timeline
+
+Where the duration is known before playback, which is a text-to-speech path, send the timeline **ahead of the first audio frame**. The service then has the whole mouth plan before the voice starts.
+
+On a realtime path the duration is only known once the turn ends, so the marks necessarily go out **after the last chunk was handed over**. That is correct while the service still holds that turn's audio buffered for playout, which is the normal case, and it is why the marks are worth sending at all on a path that would otherwise never move the mouth.
+
+## Your own video on the tile
+
+When your agent already produces video of its own (an avatar worker, a rendered face, a camera), that video can go on the tile instead of StandIn's own avatar.
+
+`session.send_tile_frame(jpeg, width, height)` puts one frame there. The SDK owns the sequence number and stamps the frame with the **outbound audio timeline**, `session.media_time_ms`, the same clock the voice is stamped on, so the two streams cannot disagree about what time it is. A wall clock keeps ticking through listening silence while the audio clock does not, so a wall-clock stamp would make the two look like they are drifting apart when they are in step.
+
+Sending frames is the easy part. Sending them at a rate that does not hurt the call is what `TileStream` owns:
+
+```python
+from standin import TileStream
+
+tile = TileStream(session)
+await tile.start()
+...
+tile.offer_rgb(rgb_bytes, width, height)   # as often as you like
+...
+await tile.aclose()
+```
+
+| Constructor argument | Default | Meaning |
+|---|---|---|
+| `session` | *(required)* | The `CallSession` the frames go to. |
+| `fps` | `12` | Clamped to 1 through `MAX_TILE_FPS`. |
+| `encoder` | `None` | Yours, or Pillow is found for you. |
+| `max_buffered_bytes` | `327680` | The backpressure budget, in bytes of unflushed outbound data. |
+
+```python
+from standin import MAX_TILE_FPS, TILE_HEIGHT, TILE_WIDTH
+
+MAX_TILE_FPS                 # 20
+TILE_WIDTH, TILE_HEIGHT      # 640, 360
+```
+
+Frames are encoded to 640 by 360, because shipping an avatar's native resolution only spends bandwidth on pixels the tile will not show. `MAX_TILE_FPS` is a sender-side sanity clamp rather than a protocol limit: a talking head gains nothing above 20, and a higher rate only spends local CPU on encoding and base64.
+
+**Latest wins, and each frame goes at most once.** Frames are offered into a single slot, never a queue. A ticker takes whatever is newest and sends it. So a source producing faster than the wire drops the middle frames rather than falling behind, and a source that stops producing goes quiet rather than repeating one stale frame forever. Silence is how a stream ends.
+
+That is right for video and would be wrong for audio. A dropped frame is a frame the caller never notices missing. A dropped audio buffer is a hole in a sentence, which is why the audio path buffers what it cannot send yet and this path throws it away.
+
+**Video yields to voice.** `TileStream` watches `session.buffered_bytes` and drops a frame rather than adding to it once the budget is exceeded, and it re-checks after an encode returns, because audio may have filled the socket while the encoder was off the loop. The default budget of 320 KiB is deliberately tighter than the audio buffer cap of `MAX_AUDIO_BUFFER_BYTES`. Both streams share one socket, and a caller forgives a dropped frame far more readily than a break in the voice, so a loaded path goes quiet promptly rather than building up seconds of skew. `frames_sent` and `frames_dropped` are both readable, and a healthy call has some drops.
+
+`offer_rgb` and `offer_jpeg` never block and never raise. They are meant to be called from a decode loop that must not be slowed down by the wire. `offer_jpeg(jpeg)` skips the encoder entirely, for a source that hands you JPEG already: nothing is re-encoded, no encoder needs to be installed at all, and the width and height default to the tile's own 640 by 360. `aclose()` is safe to call twice and on every teardown path.
+
+### The encoder
+
+Encoding packed RGB to JPEG needs Pillow, which is an optional extra:
+
+```bash
+pip install "standin-sdk[tile]"
+```
+
+Pass your own encoder to skip it. It is any callable taking packed RGB bytes plus a width and a height and returning JPEG bytes, synchronously: it is run in a worker thread rather than on the event loop, so a slow encoder costs frames and never the voice. The TypeScript twin's encoder returns a promise instead. `jpeg_encoder()` is what `start()` calls when you pass none: it returns Pillow's encoder, or `None` having logged why.
+
+<Note>
+  Without Pillow and without an encoder of your own, the tile relay stays off with one line in the log and **the call is unaffected**. The caller hears your agent and sees StandIn's rendered avatar, which is what they would have seen anyway. Pillow is optional precisely because most deployments never put their own video on the tile, and a dependency in every install is the wrong trade for a feature a minority uses. Note that `offer_jpeg` still works in that state: it is only `offer_rgb` that needs an encoder.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Vision" icon="eye" href="/python-sdk/vision">
+    The other half of the video lane: what the caller shows your agent.
+  </Card>
+  <Card title="Call tools" icon="wrench" href="/python-sdk/call-tools">
+    Giving a model the `express` tool, and the rest of the built-in surface.
+  </Card>
+</CardGroup>
