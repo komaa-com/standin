@@ -1,5 +1,6 @@
 ---
 title: "Sandbox (community tier)"
+sidebarTitle: "Community sandbox"
 description: "Add your AI voice assistant to a public Microsoft Teams meeting with no Azure bot to register. Connect your worker, share a link, and anyone can talk to your AI by voice."
 keywords: ["StandIn community tier","free Microsoft Teams AI bot","no Azure bot","public Microsoft Teams meeting AI","share meeting link","connect your agent","StandIn SDK"]
 ---
@@ -7,23 +8,11 @@ keywords: ["StandIn community tier","free Microsoft Teams AI bot","no Azure bot"
 The **community tier** lets you add an AI voice assistant to a Microsoft Teams meeting **without registering your own Azure bot**. You bring the worker (the AI); StandIn provides the shared Microsoft Teams bot, the meeting, and everything on the Microsoft side of the call. The meeting is public, so anyone with the link can join and talk to your AI by voice.
 
 <Note>
-This is different from the standard setup in the [Quickstart](/quickstart), where you connect your **own** Microsoft Teams bot and callers dial it. On the community tier there is no Azure bot to create: a shared StandIn bot joins a public meeting you generate.
+The sandbox is one of three ways to connect, and the only one with no Azure bot anywhere: a shared
+StandIn bot joins a public meeting you generate, rather than callers dialing a bot of your own.
+[Tiers](/tiers) compares all three and says which you are on. Read it first if your runtime already
+runs its own Microsoft Teams channel, because the sandbox is then the wrong lane for you.
 </Note>
-
-## Free identity vs Sandbox: which am I?
-
-The sandbox (this page) is for users **without** a runtime that already runs its own Microsoft Teams
-channel (OpenClaw's `msteams` channel plugin, the Hermes gateway's Microsoft Teams platform) - no
-Azure bot at all. If you **do** run one of those, you already have an Azure Bot App ID + secret, and the better
-free path is a **Free identity**: the same BYO-bot setup as paid (your own bot, your own tenant, inbound
-calls), with 5 minutes of call time per day included, one per account. Choose it on the
-[dashboard](https://standin.komaa.com/dashboard) ("Free (5 min/day, bring your own bot)") or at the
-pairing approve step.
-
-<Warning>
-If your runtime already runs its own Microsoft Teams channel, use a Free identity instead of the sandbox - the sandbox
-joins a **second** (shared) bot, so two bots will be in the meeting, both wired to the same agent.
-</Warning>
 
 ## What you need
 
@@ -72,7 +61,9 @@ The community tier is metered so the shared infrastructure stays fair for everyo
 - **One bot per meeting** (a second join trigger is ignored).
 - The room link is valid for **7 days**; after that you generate a new one.
 
-Need a dedicated bot, higher limits, or inbound calls to your own Microsoft Teams identity? Use the standard setup in the [Quickstart](/quickstart) with your own Microsoft Teams bot.
+Need a dedicated bot, higher limits, or inbound calls to a Microsoft Teams identity of your own? That
+is one of the other two ways in: [Tiers](/tiers) compares them, and the [quickstart](/quickstart) has
+the setup.
 
 ## How your AI connects
 

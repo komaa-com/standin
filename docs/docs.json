@@ -58,6 +58,7 @@
             "group": "Dev tools",
             "icon": "wrench",
             "pages": [
+              "tiers",
               "expose",
               "community",
               "troubleshooting"

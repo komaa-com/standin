@@ -1,0 +1,164 @@
+---
+title: "Tiers and what each gives you"
+sidebarTitle: "Tiers"
+description: "The three ways to connect an agent to StandIn: the sandbox, a Free identity, and the StandIn Managed Bot. How to tell which one you are on, what each gives you, and what each costs you."
+keywords: ["StandIn tiers","StandIn sandbox","StandIn free identity","StandIn Managed Bot","bring your own Azure bot","daily budget","which StandIn tier am I on"]
+---
+
+There are three ways to get an agent onto a Microsoft Teams call with StandIn. They differ in **who
+owns the Microsoft Teams bot** and **where the call happens**, and that one difference decides how
+much Azure work you do, who can reach your agent, and how long it may talk.
+
+Nothing on your side of the seam changes with the tier. Same package, same handler, same
+`STANDIN_SECRET`. Read this page once to pick a lane, then never think about it again while you are
+writing worker code.
+
+## Which one am I on?
+
+One question settles it: **who issued the Microsoft Teams bot?**
+
+| What you actually did | You are on | Who owns the bot |
+|---|---|---|
+| Signed in at **standin.komaa.com/sandbox**, connected your agent there, and clicked **Generate meeting link** | the **sandbox** | StandIn, shared with everyone else on it |
+| Registered your own Microsoft Entra app and Azure Bot, and deployed an identity on the free daily budget | a **Free identity** | you |
+| Added **StandIn** from the Microsoft Teams Store, typed `signin` to it, and deployed an identity with **Use the StandIn bot** | the **StandIn Managed Bot** | StandIn, operated for your organization |
+
+The tell that never lies is the App ID. If you hold an Azure Bot App ID and client secret, you are on
+your own bot; if StandIn handed you a secret and you never saw an App ID, you are on one of StandIn's
+two bots, and which one depends on whether the bot lives in a meeting StandIn generated or in your
+own organization.
+
+<Note>
+A bring-your-own-bot identity that is **not** on the free option is the same lane as a Free identity
+with the daily budget lifted: same Azure app, same app package, same endpoints, same handler. The
+free choice is a metering choice, not a different setup.
+</Note>
+
+## Side by side
+
+| | Sandbox | Free identity | StandIn Managed Bot |
+|---|---|---|---|
+| Azure app registration | none | you create and manage it | none |
+| Where the call happens | a public meeting StandIn generates, in StandIn's tenant | your own tenant | your own Microsoft organization |
+| Who can talk to your agent | anyone holding the link | people who dial your bot | people who dial StandIn in your organization |
+| Identity in Microsoft Teams | appears as StandIn | appears as your own bot | appears as StandIn |
+| Inbound calls dialed in your organization | no | yes | yes |
+| Chat | none | your runtime's own Microsoft Teams channel | `ChatChannel`, dialed out of your worker |
+| Daily budget | 5 minutes of bot time a day, per room, plus [the rest of the sandbox limits](/community#limits) | 5 minutes of call time a day, per identity | what your StandIn plan allows |
+| One-time admin work | none | an admin consent before calling works | an admin consent before calling works |
+| Where you set it up | [the sandbox page](/community) | [Microsoft Teams setup](/teams/overview) | [Connection modes](/teams/connection-modes#standin-managed-bot) |
+
+Chat is the row people misread, so read it twice. The chat lane in this SDK is what the **managed
+bot** unlocks: it dials out, so it needs no port and no tunnel. A bring-your-own-bot identity gets
+chat from its own runtime's Microsoft Teams channel instead, which is a different process from calls
+and has its own local target, and a sandbox room has neither of those things.
+[Endpoints](/teams/connection-modes#endpoints) carries every public path with the local target behind
+it, and it is the only place that list lives.
+
+Both budget rows run on the same clock, and it is not your clock:
+[the daily budget entry](/troubleshooting#community-tier-bot-leaves-or-will-not-join-daily-budget)
+says when it flips and why a bot that "hung up out of nowhere" at around five minutes is the budget
+rather than a fault.
+
+## The sandbox
+
+**What it gives you.** A Microsoft Teams meeting with no Azure bot to register, no tenant, and no
+Microsoft 365 administrator in the loop. StandIn generates the shared secret, creates the meeting,
+and hands you a link anyone can open. Your worker does the speech; StandIn draws the avatar tile from
+the hints your worker sends.
+
+**What it costs you.** The bot is shared, so it appears as StandIn rather than as you. The meeting
+lives in StandIn's tenant and the bot cannot be pulled into a meeting created in yours: that is a
+Microsoft Graph restriction rather than a StandIn setting, and
+[the tenant entry](/troubleshooting#community-tier-the-bot-cannot-join-a-meeting-in-your-own-tenant)
+has the error it produces. The link is public, so anyone who has it can talk to your agent. And the
+budget is small and the cutoff is abrupt.
+
+<Warning>
+Does your runtime already run its own Microsoft Teams channel (OpenClaw's `msteams` channel, the
+Hermes gateway's Microsoft Teams platform)? Then you already hold an Azure Bot App ID and secret,
+and the sandbox is the wrong lane: it joins a **second**, shared bot, so two bots sit in the meeting
+wired to the same agent, each answering the same person. Take a **Free identity** instead. It costs
+you nothing extra, because the Azure work you would be avoiding is work you have already done.
+</Warning>
+
+<Card title="Sandbox (community tier)" icon="flask" href="/community">
+  What you need, the four steps, the limits in full, and how a meeting reaches the agent you
+  connected.
+</Card>
+
+## A Free identity
+
+**What it gives you.** The whole bring-your-own-bot setup: your own bot, in your own tenant, carrying
+your own name, answering inbound calls that people dial directly. Nothing is fenced off. It is the
+paid setup with a daily budget attached, which makes it the honest way to evaluate StandIn against a
+real tenant instead of against a shared demo bot.
+
+**What it costs you.** The Azure work is yours: a Microsoft Entra app, an Azure Bot resource, a
+Microsoft Teams app package, and the Graph permissions with the one-time admin consent that turns
+calling on. Then 5 minutes of call time a day, per identity.
+
+Pick the free budget when you deploy the identity in the
+[dashboard](https://standin.komaa.com/dashboard). The setup itself is
+[Microsoft Teams setup](/teams/overview), and the permissions table that gates calling is
+[on the Azure bot page](/teams/azure-bot#8-grant-graph-permissions).
+
+## The StandIn Managed Bot
+
+**What it gives you.** No Azure app registration at all, and no App ID or client secret to rotate.
+You add StandIn from the Microsoft Teams Store, type `signin` so StandIn learns which Microsoft
+organization to connect, and deploy an identity in the portal that points at your agent. It is also
+what unlocks this SDK's chat lane: `ChatChannel` dials **out**, so chat needs no URL registered, no
+open port and no tunnel rule, and your worker never holds a Bot Framework credential.
+
+**What it costs you.** The bot carries StandIn's name in your organization, not yours, which is the
+whole of the trade and the reason the other lane exists. Calling waits on a Microsoft 365
+administrator approving it once for the organization; chat works before that approval lands, which is
+why a new managed connection can look half-broken when it is merely half-approved. And one agent
+instance serves one connection: the secrets belong to a single Microsoft organization, so a second
+organization means a second instance, never a shared secret.
+
+<Card title="Connection modes" icon="plug" href="/teams/connection-modes">
+  The canonical page for the Microsoft Teams side of this choice: the managed lane step by step,
+  bring your own Azure bot, the second chat key, and the endpoint table.
+</Card>
+
+## What the tier does not change
+
+The tier decides who owns the bot and what you are allowed. It never reaches into your worker, so
+these hold everywhere:
+
+- **The package and the handler.** One SDK in [Python](/python-sdk/overview) and
+  [TypeScript](/typescript-sdk/overview), the same callbacks, the same audio contract. Moving lane is
+  a configuration change.
+- **One call path to publish, and one secret.** `STANDIN_SECRET` must byte-match the secret
+  registered for the identity you are on, and a mismatch is silent by design. The path and the probes
+  are on [Expose your agent](/expose), which is the only page that carries them.
+- **What you keep is yours to gate.** `recording_active` / `recordingActive` says whether the call is
+  being recorded right now. What the SDK itself gates on it is vision: `AmbientVision`, whose
+  `require_recording` / `requireRecording` is **on** by default, and `KeyframeStore`, which keeps no
+  history while the call is not recorded. **The SDK does not gate audio on it.** The caller's speech
+  reaches your handler whether or not the call is being recorded, so anything you store, transcribe
+  to disk or send to a third party has to read the flag itself. Nothing in the SDK mirrors a call
+  into an audit log and nothing redacts what your agent says or sends: if your organization needs
+  either, it lives in your worker, on every tier.
+- **Outbound calling is off until you switch it on.** An unset `STANDIN_OUTBOUND_ALLOW` refuses every
+  outbound call, and `STANDIN_OUTBOUND_MAX_PER_HOUR` caps the rest at six an hour by default. When
+  nobody answers, **there is no voicemail**: the SDK has none. The parked line is posted back into
+  the conversation the request came from, once, marked so it reads as a missed call. A call with no
+  such conversation, which is every one-to-one call, is parked with no fallback rather than posted
+  somewhere it does not belong, because a message delivered to the wrong thread is worse than one
+  that waited.
+
+[What the SDK gives you](/concepts/features) is the full boundary between your worker, this SDK and
+the hosted service.
+
+## Moving to another tier
+
+Your handler comes with you. What does not come with you is the identity: each one has its own
+registered secret, so switching means taking the new secret from the portal, setting `STANDIN_SECRET`
+to it and restarting the worker. Never carry one secret across two identities or two organizations.
+
+Sandbox rooms do not migrate. A room link is a sandbox object and stops being interesting the moment
+you have a bot of your own, because from then on people dial your identity instead of opening a link
+you sent them.
