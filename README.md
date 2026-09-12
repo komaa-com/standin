@@ -1,85 +1,189 @@
-<div align="center">
+<p align="center">
+  <img src="assets/banner.png" alt="StandIn SDK: your AI agent, in the meeting. Answers Microsoft Teams calls, sees the shared screen, and talks back." width="100%" />
+</p>
 
-# StandIn
+<h1 align="center">StandIn SDK</h1>
 
-### Your AI teammate in Microsoft Teams calls
-
-Put your own AI agent into a Microsoft Teams call as a real participant, in your own tenant. It answers and places calls, sees the caller's camera and screen-share, converses in real time, and appears as a lip-synced avatar. Free sandbox, no Azure bot, no card.
-
-[**Try it free**](https://standin.komaa.com) &nbsp;·&nbsp; [**Documentation**](https://docs.komaa.com) &nbsp;·&nbsp; [**Quickstart**](https://docs.komaa.com/quickstart)
-
-</div>
+<p align="center">
+  <a href="#about">About</a> &nbsp;·&nbsp;
+  <a href="#how-it-works">How It Works</a> &nbsp;·&nbsp;
+  <a href="#quickstart">Quickstart</a> &nbsp;·&nbsp;
+  <a href="#plugins">Plugins</a> &nbsp;·&nbsp;
+  <a href="#documentation">Documentation</a>
+</p>
 
 ---
+
+## About
+
+**StandIn** is the open-source SDK that gives your AI agent a seat in Microsoft Teams. It answers calls,
+joins meetings, sees the shared screen, and replies in chat, as a real participant in your own tenant.
+
+You build the agent. StandIn handles everything between it and Microsoft Teams: joining the call, the Microsoft
+side, the media, and the avatar tile. There is no Microsoft Teams SDK to learn, no Graph API, and no media
+infrastructure to run.
+
+- **Build** with one API in Python or TypeScript. Same surface, same contract, at parity.
+- **Connect** what you already run: ElevenLabs, Deepgram, Cartesia, OpenAI, LiveKit, Hermes
+  Agent, OpenClaw, or your own agent in about 80 lines.
+- **Try** it before writing any agent code. The built-in echo answers a real call and sends your own
+  voice back.
+
+## How It Works
+
+Three parts, and you only write the last one.
+
+| | |
+|---|---|
+| **StandIn** | Joins the Microsoft Teams call and owns the Microsoft side: the bot identity, the media, and the avatar tile the caller sees. |
+| **This SDK** | Runs in your worker. It answers StandIn's connection, keeps the call healthy, and hands you the caller's voice. |
+| **Your agent** | Replies. Bring a framework you already run, or write a handler yourself. |
+
+```text
+   Microsoft Teams  <-->  StandIn  <-->  your worker  <-->  your agent
+```
+
+The SDK is the transport. Speech recognition, speech generation and reasoning stay with your framework
+or provider, so you keep the brain and StandIn never sees your model keys.
+
+What it does so you do not have to: authenticate the connection, keep one live call per caller, pace the
+audio in both directions, stop the agent talking over someone who interrupts, and shut down cleanly when
+a call ends or a provider fails.
+
+It also gives your agent the things that belong to being on a call rather than to any provider, so each
+plugin gets them without writing them again:
+
+| | |
+|---|---|
+| **Call tools** | Hang up, react with an expression, put an image on the bot's tile, look at the shared screen, look back at one already gone. Declared once and rendered into whichever JSON your provider wants. |
+| **Vision and display** | Frames from the caller's camera and screen share, a vision budget, a recording-gated keyframe history, and images or documents drawn onto the bot's own tile. |
+| **Consultation** | Delegate real work to a slower agent without stalling the call, and durable background tasks whose promised result survives a restart. |
+| **Meeting recap** | A bounded transcript of what was said and what was shown, written up as minutes and posted to the chat, with a Word document beside it. |
+| **Outbound calling** | Place a call, park what to say until it is answered, and fall back to chat when nobody picks up. Speak into a call that is already up instead of ringing somebody twice. |
+| **Turn-taking** | Utterance segmentation, paced playback and barge-in, composed into one lane so an agent that only reads and writes text can hold a phone call. |
+| **Lip-sync and expression** | A viseme timeline estimated from the text and spread over the audio actually sent, for Latin and Arabic, plus an emotion cue that costs no extra model call. |
+| **Checking the install** | Ring your own worker on loopback and report what worked, with no provider bill, no tunnel and no Microsoft tenant. |
+
+The [documentation](https://docs.komaa.com) covers the wire protocol and audio format when you need them.
+
+## Quickstart
+
+The built-in **echo** plugin answers a real Microsoft Teams call and sends your voice back, so you can prove
+the connection before adding an agent. It needs no framework and no API key.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install standin-sdk
+
+export STANDIN_SECRET="your-StandIn-connection-secret"
+python -m standin.plugins.echo
+```
+
+Or in TypeScript, the same echo, the same wire protocol:
+
+```bash
+npm install @komaa/standin-sdk
+
+export STANDIN_SECRET="your-StandIn-connection-secret"
+npx standin-echo
+```
+
+Create an identity at [standin.komaa.com](https://standin.komaa.com), expose port `9442` through a tunnel
+or ingress, and register the public `wss://` URL with the `/msteams/calling` path as that identity's
+agent voice URL. Then call it from Microsoft Teams and hear yourself.
+
+Once that works, swap the echo for your agent. The whole contract is seven callbacks, and you implement only
+the ones you need.
+
+**Python**
+
+```python
+from standin import CallServer, CallSession
+
+
+class MyAgent:
+    async def on_start(self, session: CallSession) -> None:
+        self._call = session
+
+    async def on_caller_audio(self, pcm: bytes) -> None:
+        await self._call.send_audio(await my_framework.respond(pcm))   # your agent
+
+
+server = CallServer(handler_factory=MyAgent)
+await server.start()
+```
+
+**TypeScript**
+
+```ts
+import { CallServer, type CallSession } from "@komaa/standin-sdk";
+
+class MyAgent {
+  #call!: CallSession;
+
+  async onStart(session: CallSession) {
+    this.#call = session;
+  }
+
+  async onCallerAudio(pcm: Buffer) {
+    await this.#call.sendAudio(await myFramework.respond(pcm)); // your agent
+  }
+}
+
+await new CallServer({ handlerFactory: () => new MyAgent() }).start();
+```
+
+## Plugins
+
+Every plugin ships inside the one package, so a new capability lands once and all of them get
+it. Each one lives in `libraries/python/standin/plugins/` or
+`libraries/typescript/src/plugins/`, and has a runnable example under [examples/](examples).
+
+| Your agent | Python | TypeScript | Example |
+|---|---|---|---|
+| [ElevenLabs](https://elevenlabs.io/docs/agents-platform/overview) | yes | yes | [elevenlabs-msteams-connector](examples/elevenlabs-msteams-connector) |
+| [Deepgram](https://developers.deepgram.com/docs/voice-agent) | yes | yes | [deepgram-msteams-connector](examples/deepgram-msteams-connector) |
+| [Cartesia](https://docs.cartesia.ai/line) | yes | yes | [cartesia-msteams-connector](examples/cartesia-msteams-connector) |
+| [OpenAI Realtime](https://platform.openai.com/docs/guides/realtime) | | yes | [openai-msteams-connector](examples/openai-msteams-connector) |
+| [LiveKit](https://docs.livekit.io/agents/) | yes | yes | [livekit-msteams-connector](examples/livekit-msteams-connector) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | yes | | [hermes-msteams-connector](examples/hermes-msteams-connector) |
+| [OpenClaw](https://openclaw.ai) | | yes | [openclaw-msteams-connector](examples/openclaw-msteams-connector) |
+| Your own | yes | yes | [Python echo](libraries/python/standin/plugins/echo), [TypeScript echo](libraries/typescript/src/plugins/echo) |
+
+Most of them cost nothing to install. ElevenLabs, Deepgram and Cartesia are reached over an
+ordinary WebSocket in both languages, and OpenAI Realtime the same way in TypeScript, so they
+are already there after `pip install standin-sdk` or `npm install @komaa/standin-sdk`, with no
+extra dependency at all.
+
+Only a plugin that runs a framework **inside** your process asks for more, and it says so in
+one line: `pip install "standin-sdk[livekit]"` or `pip install "standin-sdk[hermes-agent]"` in
+Python, or the optional peer packages named by the plugin in TypeScript.
+
+Missing yours? Adding one is a copy of the echo plugin plus a few lines of glue. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Documentation
+
+Full guides, the call handler reference, the audio and chat lanes, and the security model live at
+**[docs.komaa.com](https://docs.komaa.com)**.
 
 ## Demo
 
 https://github.com/user-attachments/assets/9ea69e04-e364-46ba-a559-9d33f40710b5
 
-A 90-second walkthrough: set up StandIn on OpenClaw, then a real Microsoft Teams call where the agent answers, sees the shared screen, speaks when addressed, and appears as a lip-synced avatar on its tile.
+A real Microsoft Teams call: the agent answers, sees the shared screen, speaks when addressed, and appears as a
+lip-synced avatar.
 
-## What it does
+## Contributing
 
-- **Listens and talks back** in real time, inside the ~200 ms window a live conversation needs, and stops the moment it is interrupted.
-- **Sees the meeting**: continuous vision over screen-share and camera, with per-participant attribution, so "what do you make of this?" just works.
-- **Speaks only when addressed**: stays silent in a group call until called by name, then steps in and steps back.
-- **Governed by default**: recording-consent gating, a closed-by-default allowlist, and signed, encrypted media.
+Issues and pull requests are welcome, and a new plugin is the most useful thing you can add.
+`make check` needs no API keys, no Microsoft tenant and no StandIn account, so a pull request from a fork
+passes CI without any secrets. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-It joins under your own Microsoft identity, and no meeting recordings are stored.
+## License
 
-## Bring your own agent
+[MIT](LICENSE), copyright 2026 Komaa DigiTech.
 
-StandIn is the hosted bridge that joins the Teams call and handles the media and avatar rendering. You bring the brain. A small open-source bridge connects your existing agent, whatever stack it runs on, so it answers Teams calls with no Teams SDK, no Microsoft Graph, and no media infrastructure to run.
-
-Seven backends, published on npm and PyPI:
-
-| Backend | What it connects | Package |
-|---|---|---|
-| **[OpenClaw](https://github.com/komaa-com/openclaw-msteams-bridge)** | The OpenClaw framework, as a plugin | [![npm](https://img.shields.io/npm/v/@komaa/openclaw-msteams-bridge?label=%40komaa%2Fopenclaw-msteams-bridge&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/openclaw-msteams-bridge) |
-| **[Hermes](https://github.com/komaa-com/hermes-msteams-bridge)** | The Hermes Agent, as a plugin | [![PyPI](https://img.shields.io/pypi/v/hermes-msteams-bridge?label=hermes-msteams-bridge&color=3775a9&logo=pypi&logoColor=white&cacheSeconds=86400)](https://pypi.org/project/hermes-msteams-bridge/) |
-| **[ElevenLabs](https://github.com/komaa-com/elevenlabs-msteams-bridge)** | A hosted ElevenLabs Agent | [![npm](https://img.shields.io/npm/v/@komaa/elevenlabs-msteams-bridge?label=npm&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/elevenlabs-msteams-bridge) [![PyPI](https://img.shields.io/pypi/v/elevenlabs-msteams-bridge?label=PyPI&color=3775a9&logo=pypi&logoColor=white&cacheSeconds=86400)](https://pypi.org/project/elevenlabs-msteams-bridge/) |
-| **[LiveKit](https://github.com/komaa-com/livekit-msteams-bridge)** | Any LiveKit Agent, including avatar agents | [![npm](https://img.shields.io/npm/v/@komaa/livekit-msteams-bridge?label=npm&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/livekit-msteams-bridge) [![PyPI](https://img.shields.io/pypi/v/livekit-msteams-bridge?label=PyPI&color=3775a9&logo=pypi&logoColor=white&cacheSeconds=86400)](https://pypi.org/project/livekit-msteams-bridge/) |
-| **[OpenAI](https://github.com/komaa-com/openai-msteams-bridge)** | OpenAI Realtime (`gpt-realtime`) | [![npm](https://img.shields.io/npm/v/@komaa/openai-msteams-bridge?label=%40komaa%2Fopenai-msteams-bridge&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/openai-msteams-bridge) |
-| **[Deepgram](https://github.com/komaa-com/deepgram-msteams-bridge)** | A Deepgram Voice Agent | [![npm](https://img.shields.io/npm/v/@komaa/deepgram-msteams-bridge?label=npm&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/deepgram-msteams-bridge) [![PyPI](https://img.shields.io/pypi/v/deepgram-msteams-bridge?label=PyPI&color=3775a9&logo=pypi&logoColor=white&cacheSeconds=86400)](https://pypi.org/project/deepgram-msteams-bridge/) |
-| **[Cartesia](https://github.com/komaa-com/cartesia-msteams-bridge)** | A Cartesia Line voice agent | [![npm](https://img.shields.io/npm/v/@komaa/cartesia-msteams-bridge?label=npm&color=cb3837&logo=npm&cacheSeconds=86400)](https://www.npmjs.com/package/@komaa/cartesia-msteams-bridge) [![PyPI](https://img.shields.io/pypi/v/cartesia-msteams-bridge?label=PyPI&color=3775a9&logo=pypi&logoColor=white&cacheSeconds=86400)](https://pypi.org/project/cartesia-msteams-bridge/) |
-
-Each backend name links to its source repository (Python siblings live in the matching `-py` repos). The Node and Python packages are interchangeable behind one wire contract, so you can switch backends without rewriting your integration.
-
-## Quickstart
-
-1. Try the free sandbox at [standin.komaa.com](https://standin.komaa.com): a shared demo bot, no Azure bot, no card.
-2. Ready to build? Create a free developer identity, connect your own Azure bot, and pick the backend that matches your stack from the table above.
-3. Follow its guide on [docs.komaa.com](https://docs.komaa.com), point your StandIn identity at the bridge, and place a call.
-
-## How it works
-
-```mermaid
-flowchart LR
-  T["Microsoft Teams call"] --> S["StandIn bridge<br/>(hosted, joins the call)"]
-  S -- "HMAC WebSocket, PCM 16 kHz" --> B["your bridge<br/>(open source, you run it)"]
-  B --> A["your AI agent<br/>(any stack)"]
-  A --> B --> S --> T
-```
-
-The hosted bridge joins the meeting, captures media, and renders the avatar. Your bridge is a small, dependency-light service that terminates an HMAC-authenticated WebSocket on one side and your agent platform on the other. Audio is 16 kHz PCM; the transport is replay-proof and recording-gated.
-
-## The three CVI pillars
-
-A Teams call becomes a true two-way video conversation:
-
-- **Perception**: the agent sees the caller's camera and screen-share, on demand or continuously.
-- **Dialogue**: realtime speech-to-speech or streaming STT to agent to TTS, with barge-in and group-call etiquette.
-- **Rendering**: a lip-synced animated avatar tile, with expression cues and picture-in-picture image sharing.
-
-## Links
-
-- Website: [standin.komaa.com](https://standin.komaa.com)
-- Docs: [docs.komaa.com](https://docs.komaa.com)
-
----
-
-<div align="center">
-
-StandIn is independent software. It is not affiliated with, endorsed by, or sponsored by Microsoft. Microsoft and Microsoft Teams are trademarks of the Microsoft group of companies.
-
-</div>
+StandIn is independent software. It is not affiliated with, endorsed by, or sponsored by Microsoft.
+Microsoft and Microsoft Teams are trademarks of the Microsoft group of companies.

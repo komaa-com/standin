@@ -18,3 +18,29 @@ id_ed25519
 
 # macOS Finder metadata. One of these reached a public repo once already.
 .DS_Store
+
+# --- build and tool caches ---------------------------------------------------
+# Added with the monorepo: the repo now carries a Python half and a TypeScript
+# half, and each brings its own.
+node_modules/
+dist/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.vite/
+
+# Virtualenvs. `make install` creates libraries/python/.venv; it is a build
+# artifact, not a checked-in dependency.
+.venv/
+venv/
+
+# Stray session-id artifacts some tools drop in the working directory when a
+# path like ":memory:" is used as a filename. Not ours and never publishable.
+:memory:*
+*.ses
+
+# Local tooling
+AGENTS.md

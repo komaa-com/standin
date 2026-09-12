@@ -1,0 +1,52 @@
+# Hygiene that runs on every commit, so it never reaches a review.
+#
+# Install it once:
+#   pip install pre-commit && pre-commit install
+# Run it over everything:
+#   pre-commit run --all-files
+#
+# Deliberately small. The real checks are `make check`, which the pre-push hook
+# runs and CI runs again; duplicating them here would make every commit slow
+# enough that somebody starts passing --no-verify, and then neither runs.
+
+repos:
+  # ---- Python -----------------------------------------------------------
+  # The same ruff the SDK already uses, so a commit cannot introduce a
+  # formatting diff that `make py-check` would then fail on.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.7  # the ruff libraries/python already pins
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^libraries/python/.*\.py$
+      - id: ruff-format
+        files: ^libraries/python/.*\.py$
+
+  # ---- Everything -------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.(png|jpg|jpeg|gif|ico|svg|zip|lock)$
+      - id: end-of-file-fixer
+        exclude: \.(png|jpg|jpeg|gif|ico|svg|zip|lock)$
+      - id: check-yaml
+      - id: check-json
+        # tsconfig files carry comments, which is legal JSON5 and not JSON.
+        exclude: ^libraries/typescript/tsconfig.*\.json$
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: debug-statements
+        files: ^libraries/python/.*\.py$
+
+  # ---- Credentials ------------------------------------------------------
+  # A commit is the last moment a secret can be kept out of history for free.
+  # After the push it is a rotation.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
