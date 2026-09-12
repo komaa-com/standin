@@ -170,7 +170,7 @@ Full guides, the call handler reference, the audio and chat lanes, and the secur
 
 ## Demo
 
-https://github.com/user-attachments/assets/9ea69e04-e364-46ba-a559-9d33f40710b5
+<img src="assets/teams-call.gif" alt="A StandIn agent on a Microsoft Teams call: it answers, sees the shared screen, and appears on its own video tile." width="100%" />
 
 A real Microsoft Teams call: the agent answers, sees the shared screen, speaks when addressed, and appears as a
 lip-synced avatar.

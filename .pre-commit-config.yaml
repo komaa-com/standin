@@ -36,7 +36,11 @@ repos:
         exclude: ^libraries/typescript/tsconfig.*\.json$
       - id: check-merge-conflict
       - id: check-added-large-files
+        # The cap is there to catch a build artifact or a lockfile committed by
+        # accident. A demo recording is neither: assets/ holds a small number of
+        # deliberately made images that the readme and the GitHub card need.
         args: [--maxkb=1024]
+        exclude: ^assets/
       - id: detect-private-key
       - id: mixed-line-ending
         args: [--fix=lf]
