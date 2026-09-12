@@ -27,6 +27,34 @@ TYPESCRIPT = Path("libraries/typescript/src/protocol.ts")
 PROVENANCE = Path("protocol/schema.sha256")
 TWO_WAY = ("both", "bidirectional")
 
+#: The SAME directions under the canonical schema's names, which this generator must accept because the
+#: canonical schema is the one it is fed.
+#:
+#: The two vocabularies name the same two endpoints from opposite seats, and the roles INVERT between them,
+#: which is why a plain string comparison silently failed rather than obviously failing. In the canonical
+#: schema the "worker" is StandIn's own media worker and the "plugin" is the customer's agent. In this SDK
+#: the "service" is StandIn and the "worker" is the customer's agent, because from here the customer's code
+#: IS the worker. So canonical "worker" maps to SDK "service", and canonical "plugin" maps to SDK "worker".
+#:
+#: Verified against three messages rather than reasoned from the names alone: session.start is
+#: worker_to_plugin and this file already asserts session.start must be service_to_worker; assistant.say is
+#: worker_to_plugin and arrives AT the agent; display.image is plugin_to_worker and is SENT BY the agent.
+DIRECTION_ALIASES = {
+    "worker_to_plugin": "service_to_worker",
+    "plugin_to_worker": "worker_to_service",
+}
+
+
+def normalise_directions(schema: dict) -> dict:
+    """Rewrite canonical direction names to this generator's vocabulary, in place.
+
+    Done ONCE, before validate, so every downstream check and emitter sees one vocabulary. The alternative,
+    widening each comparison to accept both spellings, is four places today and every place added later.
+    """
+    for msg in schema.get("messages", []):
+        msg["direction"] = DIRECTION_ALIASES.get(msg.get("direction"), msg.get("direction"))
+    return schema
+
 # SDK binding policy, not wire definitions. Preserve constructor order and
 # lenient call-context defaults while taking field names/types from the schema.
 SESSION_ORDER = (
@@ -116,6 +144,11 @@ def validate_context(fields: list[dict], expected: dict, label: str) -> None:
 
 
 def validate(schema: dict) -> None:
+    # Normalised HERE rather than in main, because main is not the only caller: protocol/test_generate.py
+    # loads a schema with parse_yaml and calls validate directly, so a fix applied only in main left every
+    # one of those tests crashing on the canonical vocabulary. validate is the chokepoint the two paths
+    # share, and normalising once means every check and emitter below sees one spelling.
+    normalise_directions(schema)
     if schema["protocol"]["discriminator"] != "type":
         raise ValueError("the SDK requires the 'type' discriminator")
     messages = {msg["type"]: msg for msg in schema["messages"]}
