@@ -1,0 +1,153 @@
+# The Python half of StandIn: ONE package, ONE manifest.
+#
+# Everything ships as `standin-sdk`. The core protocol modules sit at the top of
+# standin/, and every framework plugin sits under standin/plugins/,
+# organised by the thing it integrates. There is no sdk/ package and no
+# plugins/* packages, because a capability (screen share, call-back, camera,
+# chat, adaptive cards, speech-to-speech) must land ONCE and reach every
+# plugin, not be threaded by hand into N wheels.
+#
+# The TypeScript half is ../typescript, at parity, speaking the same wire
+# protocol from ../../protocol. Which language a plugin lives in is
+# decided by the framework it integrates, not by preference: OpenClaw and n8n
+# are TypeScript, Hermes is Python, LiveKit is both.
+#
+# Adding a plugin: create standin/plugins/<name>/, add its heavy
+# dependencies as an extra below, and add one line to standin/__init__.py's
+# _PLUGINS tuple. Nothing else changes, and no new package is published.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "standin-sdk"
+dynamic = ["version"]
+description = "Put your AI agent into a Microsoft Teams call. One SDK, every plugin."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Komaa DigiTech", email = "support@komaa.com" }]
+keywords = [
+    "ai",
+    "agents",
+    "voice",
+    "realtime",
+    "audio",
+    "speech-to-speech",
+    "microsoft teams",
+    "livekit",
+    "hermes_agent",
+    "standin",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Framework :: AsyncIO",
+    "Topic :: Communications :: Conferencing",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
+# aiohttp and nothing else. `import standin` must work on a base install, which
+# is why no module under standin/plugins/ imports its framework at module
+# load time: the extras below are the ONLY thing that pulls a framework in.
+dependencies = ["aiohttp>=3.9"]
+
+# The size control: one extra per plugin, so there is ONE documented
+# install line and one place to look for what StandIn connects to:
+#
+#     pip install "standin-sdk[livekit]"
+#
+# The base install answers a real Microsoft Teams call on its own (that is what
+# standin.plugins.echo is), so an extra is only ever the framework you
+# chose to drive it with.
+[project.optional-dependencies]
+# Empty on purpose, and it must stay a real extra. Hermes Agent ships its own
+# host and loads this adapter through the entry point below, so there is nothing
+# left for pip to fetch. Keeping the extra declared means the documented
+# `pip install "standin-sdk[hermes-agent]"` resolves, installs the adapter, and
+# adds nothing that pip could get wrong. Anything Hermes-only that IS packaged
+# later goes here, not into the base.
+hermes-agent = []
+livekit = ["livekit-agents>=1.6.10"]
+# Encoding frames for the avatar tile relay. Optional because most deployments
+# never put their own video on the tile: they let StandIn render the avatar.
+tile = ["pillow>=10.0"]
+# Rendering a document onto the bot's tile. Optional because most deployments
+# never show a file, and a PDF engine in every install is the wrong trade.
+# Office documents additionally need LibreOffice on PATH, which is not a wheel.
+render = ["pypdfium2>=4.0", "pillow>=10.0"]
+all = ["livekit-agents>=1.6.10", "pillow>=10.0", "pypdfium2>=4.0"]
+
+# How Hermes finds the plugin. The key is the name shown in `hermes plugins
+# list` and used in `plugins.enabled`; the value is the module whose
+# register(ctx) Hermes calls. The key is part of the operator's config.yaml, so
+# it is a compatibility surface: renaming it would break every deployment.
+[project.entry-points."hermes_agent.plugins"]
+msteams_bridge = "standin.plugins.hermes_agent"
+
+[project.urls]
+Homepage = "https://standin.komaa.com"
+Documentation = "https://docs.komaa.com"
+Source = "https://github.com/komaa-com/standin"
+Issues = "https://github.com/komaa-com/standin/issues"
+
+[tool.hatch.version]
+path = "standin/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["standin"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/standin", "/tests", "/README.md", "/LICENSE"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "ruff",
+    "mypy",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["standin"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "unit: fast tests with no network and no StandIn service (select with -m unit)",
+    "plugin(name): plugin test for the named framework plugin",
+]
+
+[tool.mypy]
+strict = true
+disallow_any_generics = false

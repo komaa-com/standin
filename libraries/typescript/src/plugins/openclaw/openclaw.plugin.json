@@ -1,0 +1,74 @@
+{
+  "id": "standin-msteams",
+  "name": "Microsoft Teams calls by StandIn",
+  "description": "Put your OpenClaw agent in a real Microsoft Teams call. StandIn owns the Microsoft side and dials this plugin once per call; the call is bridged straight to your configured realtime speech-to-speech provider.",
+  "icon": "https://standin.komaa.com/brand/standin-s-mark.png",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "secret": {
+        "type": "string",
+        "description": "The StandIn connection secret. Paste the value the StandIn portal shows you. Without it nothing starts."
+      },
+      "callingPort": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "description": "Port the call listener binds (default 9442)."
+      },
+      "bindAddress": {
+        "type": "string",
+        "description": "Address the call listener binds. Defaults to 0.0.0.0; set 127.0.0.1 when only a local tunnel should reach it."
+      },
+      "path": {
+        "type": "string",
+        "description": "Path StandIn dials (default /msteams/calling)."
+      },
+      "maxConcurrentCalls": { "type": "integer", "minimum": 1 },
+      "inboundPolicy": {
+        "type": "string",
+        "enum": ["disabled", "allowlist", "pairing", "open"],
+        "description": "Who may call. Defaults to disabled, which refuses every call."
+      },
+      "allowFrom": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "AAD object ids (or phone numbers) accepted under allowlist/pairing."
+      },
+      "inboundGreeting": {
+        "type": "string",
+        "description": "What the agent says when it picks up. Omitted means it waits for the caller to speak first."
+      },
+      "requireRecordingStatus": {
+        "type": "boolean",
+        "description": "Hold caller audio back until Microsoft Teams reports recording active (Microsoft Media Access API obligation)."
+      },
+      "realtime": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": { "type": "string" },
+          "providers": {
+            "type": "object",
+            "additionalProperties": { "type": "object", "additionalProperties": true }
+          },
+          "instructions": { "type": "string" },
+          "suppressInputDuringPlayback": { "type": "boolean" },
+          "echoSuppressionWindowMs": { "type": "integer", "minimum": 0 },
+          "echoBargeInRms": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  },
+  "configContracts": {
+    "secretInputs": {
+      "paths": [
+        { "path": "secret", "expected": "string" },
+        { "path": "realtime.providers.*.apiKey", "expected": "string" }
+      ]
+    }
+  }
+}
