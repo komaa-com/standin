@@ -1,64 +1,63 @@
 # =============================================================================
-# The StandIn call wire protocol - SINGLE SOURCE OF TRUTH
+# OpenClaw Teams bridge wire protocol - SINGLE SOURCE OF TRUTH
 # =============================================================================
-# One WebSocket per active Microsoft Teams call. Peers exchange JSON text
-# frames, camelCase keys, discriminated on the "type" field. Unknown fields are
-# ignored and unknown message types degrade gracefully, so older and newer peers
-# interoperate and all evolution must be additive.
+# One WebSocket per active Teams call. Peers exchange JSON text frames,
+# camelCase keys, discriminated on the "type" field. Unknown fields are
+# ignored and unknown message types degrade gracefully (older/newer peers
+# interoperate), so all evolution must be additive.
 #
-# Directions, from the point of view of code you write:
-#   service_to_worker  - StandIn sends, your worker receives
-#   worker_to_service  - your worker sends, StandIn receives
-#   both, bidirectional - travels in both directions
+# Directions:
+#   worker_to_plugin  - the .NET media worker (standin-media-bridge) sends, the
+#                       plugin (openclaw-msteams-bridge TS / hermes Python) receives
+#   plugin_to_worker  - the plugin sends, the worker receives
+#   both              - sent in both directions (audio.frame)
 #
-# This file is consumed by protocol/generate.py, which regenerates the two SDK
-# protocol modules:
-#   Python      libraries/python/standin/protocol.py
-#   TypeScript  libraries/typescript/src/protocol.ts
-# Never hand-edit those. Change this schema and regenerate; `make protocol-check`
-# fails the build if they drift.
-#
-# The StandIn service is the wire behaviour of record. Where a receiver is more
-# lenient than the wire requires, that leniency is recorded on the field rather
-# than changed, so an existing sender is never broken by a stricter reader.
+# This file is consumed by protocol/generate.py, which regenerates:
+#   - C#      src/StandIn.MediaBridge/OpenClaw/Protocol.cs           (this repo)
+#   - TS      src/protocol.gen.ts                               (openclaw-msteams-bridge)
+#   - Python  hermes_msteams_bridge/protocol.py                 (hermes-msteams-bridge)
+# The C# worker is the wire behavior of record; cross-language disagreements
+# found while unifying the three hand-written copies are recorded in
+# protocol/README.md (MISMATCHES) and preserved where they are receiver-side
+# leniency rather than wire shape.
 #
 # Field attributes:
 #   name       wire key (camelCase, exactly as serialized)
 #   type       string | int | long | object:<TypeName> | array:<TypeName>
-#   optional   may be omitted from the wire
-#   nullable   receiver also tolerates an explicit JSON null
+#   optional   may be omitted from the wire (C# emits nothing when null)
+#   nullable   receiver also tolerates an explicit JSON null (TS .nullable())
 #   default    wire default the receiver assumes when the field is omitted
-#   enum       closed enum reference, validated by the strict receiver
+#   enum       closed enum reference (validated by the TS receiver)
 #   openEnum   documented well-known values, but any string is legal on the
 #              wire (receivers must not reject unknown values)
-#   pattern    regex the strict receiver enforces
-#   tsCheck    extra TypeScript validation: min1 | nonnegative | positive
-#   pyDefault  lenient fallback the Python receiver substitutes when the field
-#              is missing or blank
-#   doc        prose for the reader of this schema. The generator does not
-#              emit it, so it can be as long as the trap it records
+#   pattern    regex the strict (TS) receiver enforces
+#   tsCheck    extra Zod validation kept from the hand-written TS schema:
+#              min1 | nonnegative | positive
+#   pyDefault  lenient fallback the Python receiver substitutes when the
+#              field is missing/blank (historical leniency, preserved)
+#   doc        comment emitted into all three artifacts
 
 protocol:
-  name: standin-call
+  name: openclaw-teams-bridge
   discriminator: type
-  doc: "Wire protocol between StandIn and your worker. One WebSocket per active Microsoft Teams call. JSON-encoded discriminated union on the 'type' field."
+  doc: "Wire protocol between the standin-media-bridge media worker and OpenClaw's voice-call msteams provider. One WebSocket per active Teams call. JSON-encoded discriminated union on the 'type' field."
 
 constants:
   - name: PCM_SAMPLE_RATE_HZ
     value: 16000
     tsName: MSTEAMS_PCM_SAMPLE_RATE_HZ
-    doc: "The wire format is PCM 16 kHz, 16-bit, mono in both directions. Both SDKs read the rate from here, so a resample is never introduced by a mismatched constant."
+    doc: "The Teams bridge wire format is PCM 16 kHz, 16-bit, mono in both directions. Single source of truth for the sample rate shared by the provider, realtime bridge, and TTS adapter."
 
 enums:
   RecordingStatus:
     open: false
     tsTypeName: MsteamsRecordingStatus
     values: [active, inactive, unknown]
-    doc: "Microsoft Teams recording status for the call. Gate any persistence or processing of media-derived data on 'active': Microsoft's media access terms allow it only while the call reports that state."
+    doc: "Microsoft Teams recording status for the call. The bot must have called Graph updateRecordingStatus before media-derived data may be persisted; receivers gate persistence/processing on 'active'."
   CallDirection:
     open: false
     values: [inbound, outbound]
-    doc: "'inbound' (caller dialed the bot) or 'outbound' (the bot placed this call, e.g. via /api/calls). Receivers default to inbound when absent."
+    doc: "'inbound' (caller dialed the bot) or 'outbound' (the bot placed this call, e.g. via /api/calls/place). Receivers default to inbound when absent."
   VideoFrameSource:
     open: false
     values: [camera, screenshare]
@@ -70,7 +69,7 @@ enums:
   DisplayImageMode:
     open: true
     values: [fullscreen, overlay]
-    doc: "'fullscreen' replaces the bot's video tile; 'overlay' renders a picture-in-picture inset over the live avatar. A receiver treats an unknown or absent value as fullscreen."
+    doc: "'fullscreen' replaces the bot's video tile; 'overlay' renders a PiP inset over the live avatar. The worker treats unknown/absent as fullscreen."
   DisplayFrameMime:
     open: true
     values: [image/jpeg]
@@ -78,7 +77,7 @@ enums:
 
 types:
   CallerInfo:
-    doc: "Microsoft Teams caller identity handed to your worker on session start. Every field is nullable because Microsoft Teams returns identities without one or more of them for guest and anonymous callers. Receivers coerce blank and whitespace strings to null so two anonymous callers never collide on an empty AAD id, which would let one caller read the other's conversation memory."
+    doc: "Teams caller identity passed to the plugin on session start. All fields are nullable because Graph occasionally returns identities without one or more of these (guest, anonymous). Receivers coerce blank/whitespace strings to null so distinct anonymous callers never collide on an empty AAD id (cross-caller memory bleed guard)."
     fields:
       - name: aadId
         type: string
@@ -96,22 +95,23 @@ types:
         nullable: true
         doc: "AAD tenant id of the caller, when known."
   SpeechMark:
-    doc: "One viseme mark: tMs milliseconds from the start of the utterance, visemeId a viseme in the Azure Speech numbering (0-21), which is the numbering the avatar expects."
+    doc: "One viseme mark: tMs milliseconds from utterance start, visemeId an Azure viseme id (0-21)."
     fields:
       - name: tMs
         type: long
         doc: "Time offset in ms, relative to the utterance/audio start."
       - name: visemeId
         type: int
-        doc: "Viseme id in the Azure Speech numbering, 0-21."
+        doc: "Azure viseme id, 0-21."
 
 messages:
-  # ---- service -> worker ------------------------------------------------------
+  # ---- worker -> plugin ------------------------------------------------------
   - type: session.start
-    direction: service_to_worker
+    direction: worker_to_plugin
+    csharp: SessionStartMessage
     python: SessionStart
     tsSchema: SessionStartSchema
-    doc: "StandIn -> your worker. Sent once after the WebSocket opens, carrying call metadata and caller identity. recordingStatus is the Microsoft Teams recording state at answer time; it is omitted when that state was unknown at answer time, and StandIn then reports it with recording.status."
+    doc: "Sent once after WebSocket open. Carries call metadata + caller identity. recordingStatus is the Teams recording state at answer time; omitted when not yet known, in which case the worker reports it later via recording.status."
     fields:
       - name: callId
         type: string
@@ -120,7 +120,7 @@ messages:
       - name: threadId
         type: string
         pyDefault: ""
-        doc: "Microsoft Teams chat thread id for the call. EMPTY on a 1:1 call, which has no meeting thread. Receivers MUST accept the empty string: a min-length check here rejects every 1:1 session.start and takes the call down with it. Never substitute the call id, because chat addressed to a call id posts to a conversation that does not exist."
+        doc: "Teams chat thread id for the call. EMPTY on a 1:1 call, which has no meeting thread: the worker never substitutes the call id here (a call id in this field made the plugin POST minutes to a conversation that does not exist). Receivers MUST accept the empty string - a min-length check on this field rejected every 1:1 session.start and dropped the call to echo."
       - name: caller
         type: object:CallerInfo
         doc: "Caller identity (best-effort; see CallerInfo)."
@@ -128,28 +128,30 @@ messages:
         type: string
         enum: RecordingStatus
         optional: true
-        doc: "Microsoft Teams recording status at answer time; omitted (null) when that state was unknown then."
+        doc: "Teams recording status at answer time; omitted (null) when not yet known."
       - name: direction
         type: string
         enum: CallDirection
         optional: true
-        doc: "Lets your worker correlate a call it placed itself. Defaults to inbound when absent."
+        doc: "Lets the plugin correlate calls it initiated. Defaults to inbound when absent."
       - name: tenantId
         type: string
         optional: true
-        doc: "The Microsoft tenant this call belongs to, so your worker can post chat for the right organisation while the call runs. Taken from the signed connection scope and never from a caller-supplied field, because a chat send is authorized with it. Absent when the connection serves a single tenant and there is nothing to disambiguate."
+        doc: "MANAGED only: the Microsoft tenant this call belongs to, so the plugin can post chat through the gateway during the call. Taken from the SIGNED route-grant scope, never a caller-supplied field - the plugin authorizes a chat send with it. Absent on BYO/free (one tenant, no gateway to post through)."
 
   - type: session.end
-    # Travels both ways. StandIn -> your worker tells the agent the call is over. The other
-    # direction is the teardown NOTICE an agent sends first ("time-limit", "agent-disconnected",
-    # "agent-unavailable"). That notice is advisory, because the socket close that follows is what
-    # actually ends the call, but it carries the only answer to "why did that call end" that the
-    # other side cannot work out for itself.
+    # Bidirectional. worker -> plugin is the original: the worker tells the agent the call is over.
+    # plugin -> worker is the teardown NOTICE an agent sends first ("time-limit",
+    # "agent-disconnected", "agent-unavailable"): advisory, because the socket close that follows is
+    # what actually ends the call, but it carries the only answer to "why did that call end" that the
+    # worker cannot work out for itself. Both LiveKit bridges have always sent it; until the worker
+    # grew a case for it, it deserialized cleanly and was discarded.
     direction: bidirectional
+    csharp: SessionEndMessage
     python: SessionEnd
     tsSchema: SessionEndSchema
     tsType: SessionEndMessage
-    doc: "Sent immediately before the socket closes. The reason is opaque text, for example 'call-ended' or 'transport-failure'."
+    doc: "Sent right before close. Reason is opaque text (e.g. 'call-ended', 'transport-failure')."
     fields:
       - name: reason
         type: string
@@ -157,22 +159,24 @@ messages:
         doc: "Opaque close reason text."
 
   - type: recording.status
-    direction: service_to_worker
+    direction: worker_to_plugin
+    csharp: RecordingStatusMessage
     python: RecordingStatus
     tsSchema: RecordingStatusMessageSchema
-    doc: "StandIn -> your worker. Reports the Microsoft Teams recording status for the call, and reports it again whenever it changes. Gate any persistence or processing of media-derived data on 'active'."
+    doc: "Worker -> plugin. Reports the Microsoft Teams recording status for the call. The plugin gates persistence/processing of media-derived data on 'active' (Media Access API: the bot must have called Graph updateRecordingStatus before media-derived data may be persisted)."
     fields:
       - name: status
         type: string
         enum: RecordingStatus
-        doc: "Current Microsoft Teams recording status."
+        doc: "Current Teams recording status."
 
   - type: audio.frame
     direction: both
+    csharp: AudioFrameMessage
     python: AudioFrame
     tsSchema: AudioFrameSchema
     tsType: AudioFrameMessage
-    doc: "Travels both ways. The sender increments seq and the receiver may use it to spot drops. payloadBase64 is base64-encoded PCM (16 kHz, 16-bit, mono, little-endian), usually one 20 ms frame: 640 raw bytes, about 856 base64 characters."
+    doc: "Bidirectional. Sender increments seq; receiver may use it to detect drops. payloadBase64 is the base64-encoded PCM16K (16kHz, 16-bit, mono, little-endian) audio bytes, usually one 20ms frame = 640 bytes raw = ~856 chars base64."
     fields:
       - name: seq
         type: long
@@ -188,13 +192,14 @@ messages:
       - name: speakerName
         type: string
         optional: true
-        doc: "StandIn -> your worker only. The active speaker's display name when unmixed audio is on, so a transcript can carry per-person attribution. Additive: absent on the mixed path."
+        doc: "Active speaker's display name when unmixed audio is on (additive; absent on the mixed path), so transcripts can carry real per-person attribution. Worker -> plugin only."
 
   - type: video.frame
-    direction: service_to_worker
+    direction: worker_to_plugin
+    csharp: VideoFrameMessage
     python: VideoFrame
     tsSchema: VideoFrameSchema
-    doc: "StandIn -> your worker. A sampled inbound video frame, from the caller camera or a screen share, as a base64 JPEG. Sent sparsely and best-effort: a frame is dropped rather than queued when the socket is busy. Keep only the latest frame per source and feed it to a vision model on demand."
+    doc: "Worker -> plugin. A sampled inbound video frame (caller camera or screen-share) as a base64 JPEG. Emitted sparsely, best-effort (dropped if the socket is busy). The plugin buffers the latest frame per source and feeds it to a vision model on demand."
     fields:
       - name: source
         type: string
@@ -207,7 +212,7 @@ messages:
       - name: width
         type: int
         tsCheck: positive
-        doc: "Frame width in pixels, already downscaled before sending."
+        doc: "Frame width in pixels (already downscaled worker-side)."
       - name: height
         type: int
         tsCheck: positive
@@ -216,7 +221,7 @@ messages:
         type: string
         tsCheck: min1
         pyDefault: image/jpeg
-        doc: "Image MIME type; the sender sends 'image/jpeg'."
+        doc: "Image MIME type; the worker sends 'image/jpeg'."
       - name: dataBase64
         type: string
         tsCheck: min1
@@ -233,10 +238,11 @@ messages:
         doc: "Display name matching participantId. Best-effort."
 
   - type: participants
-    direction: service_to_worker
+    direction: worker_to_plugin
+    csharp: ParticipantsMessage
     python: Participants
     tsSchema: ParticipantsSchema
-    doc: "StandIn -> your worker. The number of human participants on the call, excluding the bot, sent on join and whenever the roster changes. It lets an agent tell a 1:1 call (count <= 1) from a group call (count >= 2), so it can stay quiet in a group until it is addressed."
+    doc: "Worker -> plugin. The number of human participants on the call (excludes the bot), sent at join and whenever the roster changes. Lets the plugin tell a 1:1 call (count <= 1) from a group/meeting (count >= 2) so it can stay quiet until addressed in groups."
     fields:
       - name: count
         type: int
@@ -244,10 +250,11 @@ messages:
         doc: "Human participant count, excluding the bot."
 
   - type: dtmf
-    direction: service_to_worker
+    direction: worker_to_plugin
+    csharp: DtmfMessage
     python: Dtmf
     tsSchema: DtmfSchema
-    doc: "StandIn -> your worker. A DTMF key the caller pressed during the call, detected as an in-band tone. The SDK surfaces it to your handler so an agent can drive IVR-style flows ('press 1 to...')."
+    doc: "Worker -> plugin. A DTMF key the caller pressed during the call (in-band tone detected by the media platform). The plugin surfaces it to the agent so it can drive IVR-style flows ('press 1 to...')."
     fields:
       - name: digit
         type: string
@@ -255,10 +262,11 @@ messages:
         doc: "A single character: '0'-'9', '*', or '#'."
 
   - type: ping
-    direction: service_to_worker
+    direction: worker_to_plugin
+    csharp: PingMessage
     python: Ping
     tsSchema: PingSchema
-    doc: "StandIn -> your worker heartbeat, every 30 s, which keeps a proxy or NAT idle timeout from half-opening the socket. Your worker replies with pong."
+    doc: "Worker -> plugin heartbeat (every 30s; keeps proxy/NAT idle timeouts from half-opening the socket). The plugin replies with pong."
     fields:
       - name: ts
         type: long
@@ -266,32 +274,35 @@ messages:
         doc: "Sender's unix epoch ms."
 
   - type: assistant.say
-    direction: service_to_worker
+    direction: worker_to_plugin
+    csharp: AssistantSayMessage
     python: AssistantSay
     tsSchema: AssistantSaySchema
-    doc: "StandIn -> your worker. Ask the agent to speak the given text in its OWN voice just before the call is torn down, so a minute limit ends with a short goodbye instead of a bare mid-sentence hangup. The SDK injects the text into a realtime session, or speaks it down the existing TTS path when one is in use. Additive and best-effort: a worker that implements neither ignores it."
+    doc: "Worker -> plugin (H4). Ask the agent to speak the given text in its OWN realtime voice before the worker tears the call down - e.g. a brief goodbye when a time/minute limit (free trial, daily budget, or the paid max-minutes governor) cuts the call off, instead of a bare mid-sentence hangup. The plugin injects the text into the realtime session and triggers a spoken response; in streaming/TTS mode it speaks via the existing TTS path, else it no-ops. Additive/best-effort: an older plugin ignores it."
     fields:
       - name: text
         type: string
         tsCheck: min1
         doc: "The exact utterance the agent should speak (a short goodbye)."
 
-  # ---- worker -> service ------------------------------------------------------
+  # ---- plugin -> worker ------------------------------------------------------
   - type: assistant.cancel
-    direction: worker_to_service
+    direction: plugin_to_worker
+    csharp: AssistantCancelMessage
     python: AssistantCancel
     tsType: AssistantCancelMessage
-    doc: "Your worker -> StandIn. Cancel the current TTS turn, which is how a barge-in is expressed. StandIn flushes playback queued from audio it received before the cancel."
+    doc: "Plugin -> worker. Cancel the current TTS turn (barge-in). The worker flushes queued playback for audio received before this cancel."
     fields:
       - name: turnId
         type: long
         doc: "The assistant turn being cancelled (sender-scoped counter)."
 
   - type: expression
-    direction: worker_to_service
+    direction: plugin_to_worker
+    csharp: ExpressionMessage
     python: Expression
     tsType: ExpressionMessage
-    doc: "Your worker -> StandIn. Hint the emotion the avatar should express on the bot's video tile. Additive and best-effort: a receiver that does not implement it ignores it, and an unknown value falls back to neutral. It affects the video tile only, never the audio."
+    doc: "Plugin -> worker. Hint the emotion the avatar should express on the bot's video tile. Additive and best-effort: a receiver that does not implement it ignores it; unknown values fall back to neutral. Affects only the video tile, never audio."
     fields:
       - name: emotion
         type: string
@@ -299,10 +310,11 @@ messages:
         doc: "Emotion tag; see Emotion enum for well-known values."
 
   - type: speech.marks
-    direction: worker_to_service
+    direction: plugin_to_worker
+    csharp: SpeechMarksMessage
     python: SpeechMarks
     tsType: SpeechMarksMessage
-    doc: "Your worker -> StandIn. The viseme timeline for one TTS utterance: each mark is a (tMs, visemeId) pair on that utterance's audio timeline, and together they drive the avatar lip-sync. Additive and best-effort: a receiver that does not implement it ignores the message."
+    doc: "Plugin -> worker. Viseme timeline for one TTS utterance: each mark is a (tMs, visemeId) pair on the utterance's audio timeline, used to drive lip-sync. Additive/best-effort: a receiver that does not implement it ignores the message."
     fields:
       - name: ts
         type: long
@@ -312,10 +324,11 @@ messages:
         doc: "Viseme marks, ascending tMs."
 
   - type: display.image
-    direction: worker_to_service
+    direction: plugin_to_worker
+    csharp: DisplayImageMessage
     python: DisplayImage
     tsType: DisplayImageMessage
-    doc: "Your worker -> StandIn. Show the caller an image on the bot's outbound video tile for a few seconds, then return to the avatar. Additive and best-effort: a receiver that does not implement it ignores it."
+    doc: "Plugin -> worker. Show the caller an image on the bot's outbound video tile for a few seconds, then return to the avatar. Additive/best-effort: a receiver that does not implement it ignores it."
     fields:
       - name: dataBase64
         type: string
@@ -327,18 +340,18 @@ messages:
         type: int
         optional: true
         nullable: true
-        doc: "How long to show the image. StandIn applies its own default when this is omitted, null or <= 0."
+        doc: "How long to show the image; the worker applies its default when omitted/null or <= 0."
       - name: mode
         type: string
         openEnum: DisplayImageMode
         optional: true
         nullable: true
-        doc: "'fullscreen' replaces the tile and is the default; 'overlay' draws a picture-in-picture inset."
+        doc: "'fullscreen' (replace the tile; worker default) or 'overlay' (PiP inset)."
       - name: ts
         type: long
         optional: true
         default: 0
-        doc: "Reserved timeline anchor. Both SDKs send 0, and a receiver treats an absent field as 0."
+        doc: "Reserved timeline anchor. The TS sender omits it, the Python sender sends 0; the worker defaults it to 0."
       - name: caption
         type: string
         optional: true
@@ -346,13 +359,15 @@ messages:
         doc: "Optional short label drawn along the bottom of the image."
 
   - type: display.frame
-    direction: worker_to_service
+    direction: plugin_to_worker
+    csharp: DisplayFrameMessage
     python: DisplayFrame
     tsType: DisplayFrameMessage
-    # published: false keeps a message out of the generated public wire-surface
-    # table while its shape is still settling. Messages default to published.
+    # published: false excludes this experimental type from the GENERATED portal
+    # wire-surface table (generate.py emit_portal_surface). Messages default to
+    # published; flip this (or remove it) at display.frame graduation to list it.
     published: false
-    doc: "Your worker -> StandIn. One frame of a continuous avatar-video stream onto the bot tile, JPEG-compressed. Latest wins: only the newest frame matters, so a sender MUST drop frames under backpressure rather than buffer them, exactly as it does for hot-path audio. There is no lifecycle handshake: the first frames start the stream and silence ends it. Additive and best-effort, and the shape of this message may still change, so a receiver that does not implement it ignores it."
+    doc: "Plugin -> worker (experimental). One frame of a continuous avatar-video stream onto the bot tile, JPEG-compressed. Latest-wins: only the newest frame matters, and senders MUST drop (not buffer) frames under backpressure, like hot-path audio. No lifecycle handshake: the first frames start the stream, silence ends it. Additive/best-effort: older peers ignore it."
     fields:
       - name: seq
         type: long
@@ -381,10 +396,11 @@ messages:
         doc: "Source pixel height (informational)."
 
   - type: pong
-    direction: worker_to_service
+    direction: plugin_to_worker
+    csharp: PongMessage
     python: Pong
     tsType: PongMessage
-    doc: "Your worker -> StandIn heartbeat response, echoing the ping timestamp."
+    doc: "Plugin -> worker heartbeat response, echoing the ping timestamp."
     fields:
       - name: ts
         type: long
