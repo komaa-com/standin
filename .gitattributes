@@ -1,0 +1,24 @@
+# One line ending in history, whatever the checkout platform does locally.
+* text=auto eol=lf
+
+# Generated. Collapse in diffs and keep out of the language statistics, so the
+# repository reads as the two SDKs it is rather than as a lockfile.
+libraries/typescript/pnpm-lock.yaml linguist-generated=true
+libraries/python/uv.lock            linguist-generated=true
+libraries/python/standin/protocol.py    linguist-generated=true
+libraries/typescript/src/protocol.ts    linguist-generated=true
+
+# Documentation, so the repository is not reported as mostly prose.
+docs/** linguist-documentation=true
+
+# Binary. Without these git offers to merge them and produces a corrupt file.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.zip  binary
+*.woff binary
+*.woff2 binary
+*.mp3  binary
+*.wav  binary

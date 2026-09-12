@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Run what CI runs, before the push rather than after it.
+#
+# Install it with `make hooks`, which points git at this directory rather than
+# copying anything into .git/hooks. A copied hook goes stale the day somebody
+# edits this file and nobody notices for a month.
+#
+# `make check` is the same target CI runs, so a green push is a green build.
+# It takes about a minute. Skip it with `git push --no-verify` when you
+# genuinely mean to, which is mostly pushing a work-in-progress branch to share.
+
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if [ -t 1 ]; then
+    RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; DIM=$'\033[2m'; OFF=$'\033[0m'
+else
+    RED=''; GREEN=''; DIM=''; OFF=''
+fi
+
+fail() {
+    printf '%s\n' "${RED}$1${OFF}"
+    printf '%s\n' "${DIM}Push blocked. Fix it, or use --no-verify if you mean to.${OFF}"
+    exit 1
+}
+
+# ---- credentials --------------------------------------------------------
+#
+# First, because it is the only failure here that cannot be undone by a later
+# commit. Pushing a live key means rotating it, not amending it.
+#
+# Git hands a pre-push hook the refs being pushed on stdin, one per line, as
+# "<local ref> <local sha> <remote ref> <remote sha>". Read them rather than
+# guessing: a push is usually several commits, and checking only the newest
+# misses the one that carried the key.
+ZERO='0000000000000000000000000000000000000000'
+RANGES=()
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue        # a branch being deleted
+    if [ "$remote_sha" = "$ZERO" ]; then
+        # A new branch. Everything it adds that main does not already have,
+        # rather than its whole history back to the first commit.
+        RANGES+=("$local_sha" "--not" "--remotes")
+    else
+        RANGES+=("$remote_sha..$local_sha")
+    fi
+done
+
+SUSPECT=""
+if [ ${#RANGES[@]} -gt 0 ]; then
+    # Shapes that actually leak from this repository's neighbours: a provider
+    # key, a Slack token, an AWS key, a private key block. Placeholders and
+    # fixtures are excluded by name, so a docs page writing `sk-your-key-here`
+    # is not a finding.
+    SUSPECT=$(git log -p --no-color "${RANGES[@]}" 2>/dev/null \
+        | grep -E '^\+' \
+        | grep -nE '(sk-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' \
+        | grep -viE 'placeholder|example|sample|your[-_]|<[a-z-]+>|xxx+|redact|fixture|dummy|fake|test[-_]?(key|token|secret)' \
+        || true)
+fi
+if [ -n "$SUSPECT" ]; then
+    printf '%s\n' "$SUSPECT"
+    fail "That looks like a real credential in a commit you are pushing."
+fi
+
+# ---- everything CI runs -------------------------------------------------
+#
+# One target, so this hook cannot drift from the build. It covers the
+# generated protocol bindings, both test suites, both linters, and the
+# documentation site's links, imports, coverage and boundaries.
+printf '%s\n' "${DIM}running make check, the same target CI runs...${OFF}"
+if ! make check; then
+    fail "make check failed."
+fi
+
+printf '%s\n' "${GREEN}ok${OFF}"

@@ -1,0 +1,144 @@
+name: Audit
+
+# Supply chain and static analysis. This SDK sits inside somebody else's worker
+# and holds their connection secret, so a dependency with a known hole is their
+# problem as much as ours.
+#
+# Findings are reported and do NOT block a merge. That is deliberate: a
+# blocking advisory check gets disabled the first week a transitive dependency
+# picks up an unfixable CVE, and a disabled check reports nothing at all. The
+# weekly run is what makes somebody look.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "libraries/python/pyproject.toml"
+      - "libraries/python/uv.lock"
+      - "libraries/typescript/package.json"
+      - "libraries/typescript/pnpm-lock.yaml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "libraries/python/pyproject.toml"
+      - "libraries/python/uv.lock"
+      - "libraries/typescript/package.json"
+      - "libraries/typescript/pnpm-lock.yaml"
+      - ".github/workflows/audit.yml"
+  schedule:
+    # Monday 06:00 UTC, so a weekend disclosure is on somebody's desk on Monday.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-dependencies:
+    name: Python dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the SDK and its extras
+        run: |
+          python -m pip install uv==0.12.9 pip-audit
+          cd libraries/python
+          uv sync --all-extras --frozen
+      - name: Audit the resolved tree
+        run: |
+          cd libraries/python
+          # Audits what is actually installed, extras included, rather than the
+          # manifest: a hole in a transitive dependency is still a hole.
+          #
+          # `uv pip freeze` rather than `python -m pip freeze`: a uv-created
+          # environment has no pip in it, so the second reads as a missing
+          # module and takes the job down before pip-audit ever runs.
+          uv pip freeze > "$RUNNER_TEMP/resolved.txt"
+          pip-audit --progress-spinner off --desc on -r "$RUNNER_TEMP/resolved.txt" || true
+
+  typescript-dependencies:
+    name: TypeScript dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install without running any package script
+        run: |
+          npm install --global pnpm@11.20.0
+          cd libraries/typescript
+          # --ignore-scripts: an audit must not execute a dependency's install
+          # hook. That hook is exactly what a compromised package would use.
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Audit
+        run: |
+          cd libraries/typescript
+          pnpm audit --prod --audit-level high || true
+      - name: Keep the full report
+        if: always()
+        run: |
+          cd libraries/typescript
+          pnpm audit --prod --json > "$RUNNER_TEMP/pnpm-audit.json" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pnpm-audit
+          path: ${{ runner.temp }}/pnpm-audit.json
+          if-no-files-found: ignore
+
+  python-code:
+    name: Python static analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to push findings into the repository's Security tab. Without
+      # it the upload step fails with a permissions error that reads like a
+      # bug in the action.
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install bandit and its SARIF formatter
+        # Stock bandit cannot emit SARIF, and SARIF is what the Security tab
+        # reads. Without the formatter the findings live only in a log nobody
+        # opens.
+        run: pip install "bandit[toml]" bandit-sarif-formatter
+      - name: Scan the SDK
+        run: |
+          # Medium confidence and above, against the shipped package only. The
+          # tests exercise refusal paths on purpose and would report as
+          # findings that are the tests doing their job.
+          bandit -r libraries/python/standin -ll -iii -f txt || true
+      - name: Write the SARIF report
+        run: |
+          bandit -r libraries/python/standin -ll -iii -f sarif -o bandit.sarif || true
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('bandit.sarif') != ''
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # A secret is only findable in history if the history is here.
+          fetch-depth: 0
+      - name: TruffleHog
+        # Pinned to a release rather than @main. A third-party action on a
+        # moving branch runs whatever that branch says today, against this
+        # repository's contents, on every pull request.
+        uses: trufflesecurity/trufflehog@v3.97.4
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha || github.event.before }}
+          head: HEAD
+          extra_args: --results=verified,unknown
