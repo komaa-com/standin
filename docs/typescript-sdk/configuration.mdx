@@ -9,6 +9,10 @@ Everything the SDK reads from the environment is listed here, and nothing else i
 `STANDIN_` variable. Every one of them can be overridden in code, because a constructor option always
 beats an environment value.
 
+<Warning>
+**Python and TypeScript do not treat a blank `STANDIN_CHAT_SECRET` or a bad `STANDIN_PORT` the same way.** Unset `STANDIN_CHAT_SECRET` rather than exporting it empty. A non-numeric `STANDIN_PORT` is `NaN` here and a `ValueError` in Python. Details are under [How a value is read](#how-a-value-is-read). The Python twin is [Configuration](/python-sdk/configuration).
+</Warning>
+
 ## Every variable the SDK reads
 
 | Variable | Default | What reads it, and what it does |
@@ -23,7 +27,8 @@ beats an environment value.
 | `STANDIN_OUTBOUND_ALLOW` | empty, meaning off | Comma-separated directory ids this agent may ring, read by `OutboundPolicy.fromEnv()`. |
 | `STANDIN_OUTBOUND_MAX_PER_HOUR` | `6` | Outbound calls allowed in any rolling hour, across all targets. Zero means **no cap**, not "no calls", so do not reach for it to turn outbound off: leave `STANDIN_OUTBOUND_ALLOW` unset for that. |
 | `STANDIN_TENANT_ID` | none | Which organisation `VoiceDelivery` places calls into. Operator configuration only: never the message, the metadata, the model or the caller. Exported as `TENANT_ENV`. |
-| `STANDIN_STATE_DIR` | `~/.standin/state` | Where parked outbound messages are kept, created owner-only. |
+| `STANDIN_STATE_DIR` | `~/.standin/state` | Where parked outbound messages are kept, and the default parent of unfinished meeting recaps, created owner-only. |
+| `STANDIN_RECAP_DIR` | `$STANDIN_STATE_DIR/recap` | Where unfinished meeting recaps sit until they post, expire (24 hours), or hit the retry limit (8). Restart-recoverable local spool. Best-effort unless this directory is on storage that survives a process or container restart: the default is local process disk, which is ephemeral in most containers. |
 | `STANDIN_MEDIA_ROOTS` | empty, meaning off | Directories a `MEDIA:` marker may read a local file from. Exported as `MEDIA_ROOTS_ENV`. |
 | `STANDIN_VISION_API_URL` | none | The full chat-completions URL `FrameDescriber` posts a frame to, so a voice model can be asked what it is looking at. It is used exactly as written, not as a base to append a path to. |
 | `STANDIN_VISION_MODEL` | none | The model name for that endpoint. `FrameDescriber.fromEnv()` returns `undefined` unless both this and the URL are set, and that `undefined` is the signal a plugin uses to tell an agent that looking is unavailable here. |

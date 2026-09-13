@@ -9,6 +9,21 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## 0.1.1 - 2026-09-13
+
+### Added
+
+- Hang-up meeting recap on the OpenClaw and Hermes plugins (`meetingRecap` /
+  `meeting_recap`), with a local spool so unfinished minutes can send after a
+  restart.
+- `listen_only` / `listenOnly` on `ChatChannel`, so recap can post without
+  answering chat.
+- Agent Skills: `npx skills add komaa-com/skills`.
+
+### Changed
+
+- Docs for recap, connection modes, and expose stay on the public contract.
+
 ## 0.1.0 - 2026-09-12
 
 First release. Everything below is what the SDK contains rather than a delta,

@@ -318,9 +318,7 @@ for the same call has not finished tearing down.
 
 ## Voice works, chat is silent, and nothing appears in any log
 
-The diagnosis depends on which world you are in, and the two are opposites.
-
-**On the consolidated SDK**, the chat lane is dialed **out** by `ChatChannel`, so there is no mount
+The diagnosis is this: the chat lane is dialed **out** by `ChatChannel`, so there is no mount
 to get wrong and no inbound request to lose. An empty log means the channel was never started, or it
 failed to open. Check that you called `start()` on it, that a secret is set in that process too, and
 that your identity is a managed connection: the chat lane exists only for those. The lane reads
@@ -330,11 +328,21 @@ TypeScript an exported empty string counts as set and shadows a perfectly good `
 the channel refuses to start at all, while in Python the blank falls through and the lane opens. Then
 look for the `standin: chat channel open` line at startup. Without it, nothing is connected.
 
-**On a standalone bridge**, chat arrives as an ordinary `POST` to a path you publish. If your tunnel
-has no rule for it, the tunnel answers `404` at its own edge and the request never reaches a process
-that writes logs, while voice keeps working the whole time on a different rule. The empty log is the
-diagnosis: look at `tailscale funnel status`, not at the agent. Those paths belong to that bridge
-rather than to this SDK, which is why they are not on this site.
+## Meeting recap is on, the call ended, and nothing landed in chat
+
+The plugin wrote the transcript (look under `STANDIN_RECAP_DIR` or `~/.standin/state/recap`) and
+then had nowhere this SDK can post.
+
+- **Sandbox:** no chat lane. Recap cannot deliver. [Tiers](/tiers#the-sandbox).
+- **Bring your own Azure bot / Free identity:** chat is your Azure Bot messaging URL, not
+  `ChatChannel`. This switch will not post there. The host must also have a summarization consult.
+- **StandIn Managed Bot:** `ChatChannel` must actually open. Same checks as
+  [chat is silent](#voice-works-chat-is-silent-and-nothing-appears-in-any-log): secret, `start()`,
+  and a chat key if StandIn issued a separate one. Recap opens the lane listen-only, so it will not
+  answer chat even when posting works.
+
+Hang-up does not await the consult. Meeting recaps are best-effort. They may be lost if the worker
+exits during processing.
 
 ## The bot answers calls but ignores Microsoft Teams chat (DM pairing)
 
@@ -461,9 +469,6 @@ missing dependency the first time it uses one: `standin-sdk[tile]` encodes frame
 tile, and `standin-sdk[render]` draws a document onto that tile. Office formats additionally need
 LibreOffice on `PATH`, which is not something pip can fetch. `standin-sdk[all]` pulls all of them in
 at once.
-
-The older standalone bridges were published under their own names. Each is superseded by the
-plugin of the same name in this SDK, which is where new work goes.
 
 <Tip>
 Still stuck? Re-read the [quickstart](/quickstart) end to end. Most remaining issues are a variable

@@ -27,6 +27,7 @@ import {
   FrameAligner,
   REALTIME_SAMPLE_RATE_HZ,
   SAMPLE_RATE_HZ,
+  Transcript,
   frameDurationMs,
   resamplePcm16,
   type CallSession,
@@ -86,6 +87,8 @@ export interface RealtimeCall {
   interrupt(): void;
   /** Speak this line in the agent's own voice, now. */
   say(text: string): void;
+  /** Turns collected during the call, for an opt-in meeting recap. */
+  readonly transcript: Transcript;
   /** Release the provider session. Idempotent. */
   close(): void;
 }
@@ -97,6 +100,24 @@ export interface RealtimeCall {
  * the owner of the sequence number and the outbound timeline, so nothing here
  * tracks either.
  */
+/**
+ * Who to file a caller turn under.
+ *
+ * On unmixed audio the session names the active speaker, and that is the person
+ * to credit: in a meeting, filing every attendee under the caller who dialled in
+ * is confidently wrong attribution, and the transcript merge would then fold
+ * their words into one block. On the mixed path `speaker` is undefined and the
+ * caller's own first name is the best available.
+ */
+export function turnSpeaker(session: {
+  speaker?: string | undefined;
+  start: { caller: { displayName?: string | undefined } };
+}): string {
+  const active = session.speaker?.trim();
+  if (active) return active.split(/\s+/)[0] ?? active;
+  return session.start.caller.displayName?.trim().split(/\s+/)[0] || "Caller";
+}
+
 export function createRealtimeCall(params: {
   session: CallSession;
   deps: RealtimeCallDeps;
@@ -106,6 +127,7 @@ export function createRealtimeCall(params: {
   const callId = session.callId;
 
   let closed = false;
+  const transcript = new Transcript();
 
   /**
    * Estimated epoch ms at which the audio already sent finishes PLAYING.
@@ -224,6 +246,15 @@ export function createRealtimeCall(params: {
       if (role === "user" && text.trim().length > 0) {
         callerTurnStarted = true;
       }
+      if (isFinal && text.trim()) {
+        const speaker =
+          role === "assistant" ? "Assistant" : turnSpeaker(session);
+        transcript.add(
+          speaker,
+          text,
+          role === "assistant" ? "assistant" : "caller",
+        );
+      }
       if (role === "assistant" && isFinal) {
         // End of turn: the residual is real audio, not a fragment to discard.
         flushTail();
@@ -305,6 +336,8 @@ export function createRealtimeCall(params: {
         );
       }
     },
+
+    transcript,
 
     say: (text: string) => {
       if (closed || !text.trim()) return;

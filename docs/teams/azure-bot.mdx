@@ -131,25 +131,21 @@ and set **Messaging endpoint** to the URL from your StandIn dashboard.
 </Frame>
 
 <Note>
-  This messaging endpoint matters only if you serve Bot Framework chat yourself. On a
+  This messaging endpoint matters only if you serve Microsoft Teams chat yourself. On a
   bring-your-own-bot identity you also set an **Agent chat URL** in the StandIn dashboard: the
-  `https://` URL where your runtime's own Microsoft Teams channel listens, typically
-  `https://<your-public-host>/api/messages` in front of `127.0.0.1:3978` (paste the bare host and
-  StandIn appends the path). Until then, chat messages get a "chat endpoint not configured" reply.
+  HTTPS URL the portal shows. Until then, chat messages get a "chat endpoint not configured" reply.
 
-  That endpoint is your runtime's, not the SDK's. The consolidated SDK's chat lane is dialed **out**
-  by `ChatChannel`, needs no URL registered and no port exposed, and is available on managed
-  connections. See [Expose your agent](/expose) and
-  [Architecture](/concepts/architecture#two-lanes).
+  That endpoint is yours, not the SDK's. The SDK's chat lane is dialed **out** by `ChatChannel`,
+  needs no URL registered and no port exposed, and is available on managed connections. See
+  [Expose your agent](/expose) and [Connection modes](/teams/connection-modes#endpoints).
 </Note>
 
 <Warning>
   **Two different sets of endpoints, and mixing them up breaks the setup.** The URLs on *this* page -
-  the calling webhook in step 6 and the messaging endpoint in step 7 - are **StandIn's** hosted
-  addresses (`https://<identity>.standin.komaa.com/api/calling` and `/api/messages`), taken from your
-  dashboard and pasted into Azure. The `/msteams/calling` and `/api/messages` paths you publish from
-  your own machine are a **separate layer**, and they go in the StandIn dashboard, never in the Azure
-  portal.
+  the calling webhook in step 6 and the messaging endpoint in step 7 - are StandIn URLs
+  (`https://<identity>.standin.komaa.com/api/calling` and `/api/messages`), taken from your
+  dashboard and pasted into Azure. The worker URL you publish (`/msteams/calling`) goes in the
+  StandIn dashboard, never in the Azure portal.
 </Warning>
 
 ## 8. Grant Graph permissions
@@ -162,7 +158,7 @@ permission → Microsoft Graph → Application permissions**, add the list below
   <img src="/images/teams/graph-add-permission.png" alt="Azure portal API permissions blade with Add a permission opening the Microsoft Graph API panel" />
 </Frame>
 
-This is the canonical list. It applies to every SDK, plugin and legacy bridge alike:
+This is the canonical list. It applies to every SDK and plugin alike:
 
 <table>
   <thead>

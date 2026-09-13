@@ -43,7 +43,16 @@ await chat.start();
 
 `ChatChannel` throws a `StandInError` at construction when no secret is available. Managed
 connections only, and that needs no flag: the socket authenticates with your connection secret, so if
-it opens at all you are managed.
+it opens at all you are managed. The [sandbox](/tiers#the-sandbox) has no chat lane. A meeting recap
+that only posts uses `listenOnly: true` so it never answers.
+
+## Meeting recap
+
+`listenOnly: true` is how a recap lane posts without answering. The host must supply that outbound chat
+lane (`chat.start()`) and a summarization callback (`postMinutes` or the plugin consult). Hang-up
+does not await the post.
+
+Meeting recaps are best-effort. They may be lost if the worker exits during processing.
 
 ## Options
 
@@ -53,6 +62,7 @@ it opens at all you are managed.
 | `secret` | `STANDIN_CHAT_SECRET`, then `STANDIN_SECRET` | The key this lane signs its dial with. |
 | `url` | `STANDIN_CHAT_URL`, then `wss://teams.standin.komaa.com/api/chat/channel` | The chat channel endpoint. |
 | `chats` | none | A [`PersonalChats`](#remembering-who-messaged-you) to feed on every inbound message, so a 1:1 call has somewhere to post to. |
+| `listenOnly` | `false` | Take messages without answering them. `chats` is still fed, `respond` is never called, and nothing is sent back, not even the typing indicator. For a lane that only posts, such as a meeting recap, when something else already answers this connection's chat. |
 
 ### Which secret
 

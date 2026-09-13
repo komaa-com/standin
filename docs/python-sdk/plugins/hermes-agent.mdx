@@ -44,7 +44,7 @@ Hermes loads the plugin **in-process**, through the `hermes_agent.plugins` entry
 msteams_bridge = "standin.plugins.hermes_agent"
 ```
 
-The entry point key stays `msteams_bridge`, which is the name shown in `hermes plugins list` and used in `plugins.enabled`, so an operator upgrading from the standalone bridge keeps their `config.yaml` unchanged.
+The entry point key is `msteams_bridge`, the name shown in `hermes plugins list` and used in `plugins.enabled`.
 
 The Hermes host is deliberately **not** a dependency of the package. Hermes is not on PyPI: it is the application the plugin is installed into. Everything that does not need the host works without it, and everything that does raises `HermesUnavailable` with a sentence saying so.
 
@@ -102,13 +102,16 @@ The same listener with no host. The call is answered and the model talks; `herme
 
 The `plugins.entries.msteams_bridge.config` block, with a `MSTEAMS_BRIDGE_*` environment variable as the fallback for each key. Both are supported because both already exist in the field.
 
+Copy each allowlisted id from `session.start.caller.aad_id` on an inbound call. Emails never match.
+
 | Key | Environment | Default | Meaning |
 |---|---|---|---|
 | `allowlist` | `MSTEAMS_BRIDGE_ALLOWLIST` | *(empty)* | AAD object ids that may call. **Empty denies everyone** unless `allow_all`. |
 | `allow_all` | `MSTEAMS_BRIDGE_ALLOW_ALL` | `false` | Accept any caller. Explicit opt-in. |
 | `allowlist_allow_names` | `MSTEAMS_BRIDGE_ALLOWLIST_ALLOW_NAMES` | `false` | Match display names too. Spoofable, so off by default. |
 | `require_recording` | `MSTEAMS_BRIDGE_REQUIRE_RECORDING` | `true` | Wait for the Microsoft Teams recording banner before speaking or listening. |
-| `session_scope` | `MSTEAMS_BRIDGE_SESSION_SCOPE` | `per-call` | Agent memory: `per-call`, `per-thread`, `per-aad`. |
+| `meeting_recap` | `MSTEAMS_BRIDGE_MEETING_RECAP` | `false` | After the call ends, post minutes to the Microsoft Teams chat. Needs the StandIn chat lane and a summarization consult. Best-effort: hang-up does not await the post. Transcript is written to disk first. |
+| `session_scope` | `MSTEAMS_BRIDGE_SESSION_SCOPE` | `per-call` | Memory of the agent session used for consults and the minutes: `per-call`, `per-thread`, `per-aad`. |
 | `wake_phrases` | `MSTEAMS_BRIDGE_WAKE_PHRASES` | `assistant, hermes` | What addresses the assistant in a meeting. |
 | `require_address` | `MSTEAMS_BRIDGE_REQUIRE_ADDRESS` | `true` | Stay silent in a meeting until addressed. |
 | `follow_up_window_ms` | `MSTEAMS_BRIDGE_FOLLOW_UP_WINDOW_MS` | `12000` | How long an addressed turn keeps the floor. |
@@ -151,7 +154,7 @@ Three more keys tune **turn detection**, which is what to reach for when the ass
 
 The default `instructions` are deliberately about voice behaviour and not about who the assistant is: identity comes from the operator's own Hermes configuration through the consult boundary, so the caller talks to the same assistant they know from chat. Override it and you are replacing the voice manner, not the personality.
 
-The listener itself belongs to the SDK: `STANDIN_SECRET`, `STANDIN_PORT` (9442), `STANDIN_HOST` (0.0.0.0), `STANDIN_WS_PATH` (`/msteams/calling`).
+The listener itself belongs to the SDK: `STANDIN_SECRET`, `STANDIN_PORT` (9442), `STANDIN_HOST` (0.0.0.0), `STANDIN_WS_PATH` (`/msteams/calling`). Unfinished recaps sit under `STANDIN_RECAP_DIR`, else `STANDIN_STATE_DIR/recap`, else `~/.standin/state/recap`.
 
 <Warning>
 Turning `input_transcribe_model` off disables the group gate and the verbal interrupts as well, because both read the caller's transcript. The plugin logs a warning when it starts a call that way.
@@ -182,7 +185,7 @@ The assistant stays silent until somebody says one of the wake phrases, then kee
 
 Saying "stop" or "wait" as a whole utterance cuts playback in code, whether or not the model would have stopped. Phrases ship for four languages, English, Arabic, French and German, and the match is on the whole utterance rather than a substring, so "stop by the store" is a sentence rather than an interruption. [Stop means stop](/python-sdk/group-calls#stop-means-stop) has the set and the normalisation.
 
-The gate decides "is this a meeting?" from the **thread id**: Microsoft Teams gives a meeting or channel conversation a thread beginning `19:`, and it is present in `session.start` on every call. The participant count is kept as a second, corroborating signal that can only add certainty, never remove it. That is a fix: the standalone bridge this plugin replaces decided from a participant count that does not arrive on the meeting-join path, so the assistant answered every turn of every meeting it was invited to.
+The gate decides "is this a meeting?" from the **thread id**: Microsoft Teams gives a meeting or channel conversation a thread beginning `19:`, and it is present in `session.start` on every call. The participant count is kept as a second, corroborating signal that can only add certainty, never remove it. A participant count does not arrive on the meeting-join path, so a gate that used only that number would answer every turn of every meeting it was invited to.
 
 The goodbye was the other fix. StandIn sends a closing line when it is about to end a call, so it almost always arrives while the model is mid-answer. The old path injected it with a plain say, whose response creation is guarded on "is a response already active", so the guard swallowed it and the caller heard nothing before the line went dead. This plugin cancels the response first, then speaks.
 
@@ -204,7 +207,32 @@ yourself if your agent needs them:
 
 - looking at a screen share, and showing a picture, a page or a file: [Vision and the avatar](/python-sdk/vision)
 - ringing somebody back: [Reaching people](/python-sdk/reaching-people), where `CALL_BACK_TOOL` and `CHAT_CALLBACK_TOOL` ship from the `standin` barrel
-- writing up the meeting: [Meeting recap](/python-sdk/minutes), where `MINUTES_TOOL` does
+- writing up the meeting yourself, if you did not turn `meeting_recap` on: [Meeting recap](/python-sdk/minutes)
+
+## Meeting recap
+
+Off until `meeting_recap: true` (or `MSTEAMS_BRIDGE_MEETING_RECAP=true`). The plugin then:
+
+1. Collects the call transcript.
+2. Writes a restart-recoverable local spool before hang-up returns. A process restart drains what was left if that directory survives the process. Treat recap as best-effort unless that directory is on storage that survives a process or container restart. The file stays until posted, expired (24 hours), or the retry limit (8).
+3. Posts minutes through chat. If Hermes already gave this process a `respond` handler, recap reuses that lane. If not, it opens a **listen-only** [chat lane](/python-sdk/chat) that never answers.
+
+The host must provide an outbound chat lane and a summarization consult. Hang-up does not wait for the consult. Meeting recaps are best-effort. They may be lost if the worker exits during processing.
+
+<Note>
+This is the difference from the OpenClaw plugin. OpenClaw always opens a dedicated listen-only lane when recap is on. Hermes does not open a second lane when the host already answers chat.
+</Note>
+
+<Warning>
+Delivery uses StandIn's outbound chat socket. That socket exists on the **StandIn Managed Bot**
+([Tiers](/tiers)). The sandbox has no chat lane. A bring-your-own-bot identity answers chat through
+its Azure Bot messaging URL, not this socket, so this switch will not post there. Put
+`STANDIN_RECAP_DIR` on persistent storage when recap reliability matters. A directory that dies with
+the process loses unfinished minutes.
+</Warning>
+
+`session_scope` keys the **consult that writes the minutes**, not the voice session. Voice is always
+one session per call.
 
 ## On the tile
 

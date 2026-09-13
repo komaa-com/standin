@@ -45,6 +45,11 @@ _HOST_ALLOWLIST_ENV = "MSTEAMS_BRIDGE_ALLOWLIST"
 _HOST_ALLOW_ALL_ENV = "MSTEAMS_BRIDGE_ALLOW_ALL"
 
 
+async def _no_reply(_message: InboundMessage) -> str:
+    """The respond of a listen-only lane. Never called; the lane answers nothing."""
+    return ""
+
+
 class MicrosoftTeamsPlatform:
     """One Microsoft Teams voice lane, owned by the host.
 
@@ -123,7 +128,7 @@ class MicrosoftTeamsPlatform:
         # URL problem is a configuration problem, not a reason to drop calls,
         # and a chat port conflict has taken voice down before.
         try:
-            self._chat = await self._start_chat_lane()
+            self._chat = await self._start_chat_lane(plugin)
         except Exception as err:
             logger.warning("standin: the chat lane did not start, calls are unaffected: %s", err)
             self._chat = None
@@ -139,6 +144,9 @@ class MicrosoftTeamsPlatform:
         """
         chat, self._chat = self._chat, None
         if chat is not None:
+            from .recap import set_chat_lane
+
+            set_chat_lane(None)
             with contextlib.suppress(Exception):
                 await chat.aclose()
 
@@ -175,20 +183,40 @@ class MicrosoftTeamsPlatform:
             "error": result.error,
         }
 
-    async def _start_chat_lane(self) -> Any:
+    async def _start_chat_lane(self, plugin: PluginConfig) -> Any:
         """The chat lane, if the host gave something to answer with.
 
         Deliberately not a second inbound port. A listener of its own would mean
         a second admission policy on a second surface, which is the exposure the
         SDK's outward-dialling chat lane exists to avoid: it connects to StandIn
         and listens on nothing.
-        """
-        if self._respond is None:
-            return None
-        from standin import ChatChannel
 
-        chat = ChatChannel(respond=self._respond)
+        With ``meeting_recap`` on and no ``respond`` from the host, the lane is
+        opened LISTEN-ONLY: it posts minutes and remembers who has a 1:1 chat
+        with the bot, and it answers nothing. Without that the recap had nowhere
+        to post unless the host happened to wire chat.
+        """
+        if self._respond is None and not plugin.meeting_recap:
+            return None
+        from standin import ChatChannel, PersonalChats
+
+        chats = PersonalChats()
+        if self._respond is None:
+            chat = ChatChannel(respond=_no_reply, chats=chats, listen_only=True)
+        else:
+            chat = ChatChannel(respond=self._respond, chats=chats)
         await chat.start()
+        if self._respond is None:
+            logger.info(
+                "standin: chat lane open for meeting recap (posts minutes, answers nothing)"
+            )
+        from .recap import drain_recap_spool, set_chat_lane
+
+        set_chat_lane(chat, chats)
+        if plugin.meeting_recap:
+            task = asyncio.create_task(drain_recap_spool(), name="standin-recap-drain")
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
         return chat
 
     def get_chat_info(self, chat_id: str) -> dict[str, str]:

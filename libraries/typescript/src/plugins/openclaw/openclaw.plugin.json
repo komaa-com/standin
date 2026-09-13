@@ -46,6 +46,15 @@
         "type": "boolean",
         "description": "Hold caller audio back until Microsoft Teams reports recording active (Microsoft Media Access API obligation)."
       },
+      "sessionScope": {
+        "type": "string",
+        "enum": ["per-call", "per-thread", "per-aad"],
+        "description": "Memory of the agent session that writes the minutes: per-call (default), per-thread, or per-aad. The voice session is always per call."
+      },
+      "meetingRecap": {
+        "type": "boolean",
+        "description": "After the call ends, write minutes into the Microsoft Teams chat. The transcript is written to disk first so a process restart still posts."
+      },
       "realtime": {
         "type": "object",
         "additionalProperties": false,

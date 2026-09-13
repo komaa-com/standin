@@ -20,6 +20,7 @@ import ast
 import asyncio
 import contextlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ from standin import (
     echo_guard,
     gate,
 )
+from standin.minutes import Transcript
 
 # Imported outright, not with importorskip. One package ships the Hermes
 # plugin in the base install and it holds no import of the host, so a skip
@@ -53,6 +55,7 @@ from standin.plugins.hermes_agent import consult as hconsult
 from standin.plugins.hermes_agent import (
     handler,
     realtime,
+    recap,
     tools,
 )
 
@@ -64,9 +67,12 @@ pytestmark = pytest.mark.unit
 class FakeSession:
     """A CallSession that records what the plugin does to the wire."""
 
-    def __init__(self, start: SessionStart) -> None:
+    def __init__(self, start: SessionStart, participant_count: int = 1) -> None:
         self.start = start
         self.call_id = start.call_id
+        self.participant_count = participant_count
+        # The active speaker on unmixed audio; None on the mixed path, like the SDK.
+        self.speaker: str | None = None
         self.sent: list[bytes] = []
         self.ended: list[str] = []
         self.events: list[str] = []
@@ -160,8 +166,228 @@ def _start(**kwargs) -> SessionStart:
 RT_ENV = {"OPENAI_API_KEY": "sk-not-a-real-key"}
 
 
+# ---------------------------------------------------------------- meeting recap
+
+
+class _FakeLane:
+    """A chat lane that records what it was asked to post."""
+
+    def __init__(self) -> None:
+        self.posted: list[dict[str, str]] = []
+
+    async def send(self, *, tenant_id: str, conversation_id: str, text: str) -> bool:
+        self.posted.append(
+            {"tenant_id": tenant_id, "conversation_id": conversation_id, "text": text}
+        )
+        return True
+
+
+class _FakeConsult:
+    def __init__(self, answer: str = "- Ship on Friday") -> None:
+        self.answer = answer
+        self.prompts: list[str] = []
+
+    async def ask(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self.answer
+
+
+def _spoken() -> Transcript:
+    transcript = Transcript()
+    transcript.add("Dana", "we agreed to ship on Friday")
+    transcript.add("Assistant", "noted, Friday it is", role="assistant")
+    return transcript
+
+
+async def test_a_group_call_posts_its_minutes_to_the_thread() -> None:
+    """Two people on a call whose thread is not meeting-shaped: the participant
+    count is what routes the minutes to the shared thread, not to one caller's
+    private chat. The count lives on the session as participant_count."""
+    lane = _FakeLane()
+    consult = _FakeConsult()
+    recap.set_chat_lane(lane)
+    try:
+        session = FakeSession(
+            _start(thread_id="19:group-thread", tenant_id="t1"), participant_count=2
+        )
+        await recap.run_meeting_recap(
+            session=session, transcript=_spoken(), consult=consult, enabled=True
+        )
+    finally:
+        recap.set_chat_lane(None)
+    assert len(consult.prompts) == 1
+    assert len(lane.posted) == 1
+    assert lane.posted[0]["conversation_id"] == "19:group-thread"
+    assert lane.posted[0]["tenant_id"] == "t1"
+    assert "Ship on Friday" in lane.posted[0]["text"]
+
+
+async def test_recap_with_no_lane_spends_no_consult() -> None:
+    consult = _FakeConsult()
+    recap.set_chat_lane(None)
+    session = FakeSession(_start(thread_id="19:group-thread", tenant_id="t1"), participant_count=2)
+    await recap.run_meeting_recap(
+        session=session, transcript=_spoken(), consult=consult, enabled=True
+    )
+    assert consult.prompts == []
+
+
+async def test_recap_is_scheduled_off_the_teardown_path() -> None:
+    """aclose must not wait on the summarising consult: the SDK frees the
+    call's slot only after aclose returns."""
+    lane = _FakeLane()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _SlowConsult:
+        async def ask(self, prompt: str) -> str:
+            started.set()
+            await release.wait()
+            return "minutes"
+
+    recap.set_chat_lane(lane)
+    try:
+        session = FakeSession(
+            _start(thread_id="19:group-thread", tenant_id="t1"), participant_count=2
+        )
+        task = recap.schedule_meeting_recap(
+            session=session, transcript=_spoken(), consult=_SlowConsult(), enabled=True
+        )
+        assert task is not None
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert lane.posted == [], "the consult is still running, nothing posted yet"
+        release.set()
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        recap.set_chat_lane(None)
+    assert len(lane.posted) == 1
+    assert _spool() == []
+
+
+def _spool() -> list[Path]:
+    """Recap files this test's STANDIN_RECAP_DIR currently holds."""
+    root = Path(os.environ["STANDIN_RECAP_DIR"])
+    if not root.exists():
+        return []
+    return [
+        path
+        for path in root.iterdir()
+        if path.name.endswith(".json") or path.name.endswith(".claimed")
+    ]
+
+
+async def test_schedule_writes_the_spool_before_the_consult_starts() -> None:
+    """aclose returns after the transcript is on disk, not after the minutes
+    have been written. A restart in between still has something to drain."""
+    lane = _FakeLane()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _SlowConsult:
+        async def ask(self, prompt: str) -> str:
+            started.set()
+            await release.wait()
+            return "minutes"
+
+    recap.set_chat_lane(lane)
+    try:
+        session = FakeSession(
+            _start(thread_id="19:group-thread", tenant_id="t1"), participant_count=2
+        )
+        task = recap.schedule_meeting_recap(
+            session=session, transcript=_spoken(), consult=_SlowConsult(), enabled=True
+        )
+        assert task is not None
+        assert _spool(), "the transcript must be on disk before the consult starts"
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert _spool(), "a recap in flight is claimed, not deleted"
+        release.set()
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        recap.set_chat_lane(None)
+    assert _spool() == []
+
+
+async def test_a_restart_still_posts_the_minutes() -> None:
+    """No chat lane at hang-up: the recap sits on disk. Opening the lane and
+    draining is what a process restart looks like."""
+    recap.set_chat_lane(None)
+    session = FakeSession(_start(thread_id="19:group-thread", tenant_id="t1"), participant_count=2)
+    task = recap.schedule_meeting_recap(
+        session=session, transcript=_spoken(), consult=_FakeConsult(), enabled=True
+    )
+    assert task is not None
+    await asyncio.wait_for(task, timeout=2)
+    assert _spool(), "a recap with nowhere to post must be kept"
+
+    lane = _FakeLane()
+    recap.set_chat_lane(lane)
+    try:
+        posted = await recap.drain_recap_spool(consult=_FakeConsult())
+    finally:
+        recap.set_chat_lane(None)
+    assert posted == 1
+    assert len(lane.posted) == 1
+    assert "Ship on Friday" in lane.posted[0]["text"]
+    assert _spool() == []
+
+
+async def test_a_failed_consult_leaves_the_spool() -> None:
+    class _Boom:
+        async def ask(self, prompt: str) -> str:
+            raise RuntimeError("agent down")
+
+    lane = _FakeLane()
+    recap.set_chat_lane(lane)
+    try:
+        session = FakeSession(
+            _start(thread_id="19:group-thread", tenant_id="t1"), participant_count=2
+        )
+        task = recap.schedule_meeting_recap(
+            session=session, transcript=_spoken(), consult=_Boom(), enabled=True
+        )
+        assert task is not None
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        recap.set_chat_lane(None)
+    assert lane.posted == []
+    assert _spool()
+
+
+async def test_two_drains_do_not_double_post() -> None:
+    recap.set_chat_lane(None)
+    session = FakeSession(_start(thread_id="19:group-thread", tenant_id="t1"), participant_count=2)
+    task = recap.schedule_meeting_recap(
+        session=session, transcript=_spoken(), consult=_FakeConsult(), enabled=True
+    )
+    assert task is not None
+    await asyncio.wait_for(task, timeout=2)
+
+    lane = _FakeLane()
+    recap.set_chat_lane(lane)
+    try:
+        await asyncio.gather(
+            recap.drain_recap_spool(consult=_FakeConsult()),
+            recap.drain_recap_spool(consult=_FakeConsult()),
+        )
+    finally:
+        recap.set_chat_lane(None)
+    assert len(lane.posted) == 1
+
+
+def test_an_empty_transcript_is_not_spooled() -> None:
+    session = FakeSession(_start(thread_id="19:group-thread", tenant_id="t1"), participant_count=2)
+    assert (
+        recap.schedule_meeting_recap(
+            session=session, transcript=Transcript(), consult=_FakeConsult(), enabled=True
+        )
+        is None
+    )
+    assert _spool() == []
+
+
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """No MSTEAMS_BRIDGE_* or provider variable leaks in from the machine."""
     for key in list(dict(__import__("os").environ)):
         if key.startswith(("MSTEAMS_BRIDGE_", "STANDIN_")) or key in (
@@ -172,6 +398,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(key, raising=False)
     for k, v in RT_ENV.items():
         monkeypatch.setenv(k, v)
+    monkeypatch.setenv("STANDIN_RECAP_DIR", str(tmp_path / "recap"))
 
 
 def _handler(**plugin_kwargs) -> handler.RealtimeHandler:
@@ -633,6 +860,32 @@ async def test_an_addressed_turn_clears_a_stale_drop_and_asks_for_a_reply() -> N
     assert "create_response" in rt.names()
 
 
+async def test_two_speakers_become_two_transcript_blocks() -> None:
+    """Unmixed audio names the active speaker, and each person's words are filed
+    under their own name. Filed under the caller alone, the merge would fold
+    every attendee into one block with the wrong name on it."""
+    session = FakeSession(_start(thread_id="19:meeting@thread.v2"), participant_count=2)
+    h, _rt = await _started(session)
+    session.speaker = "Dana Reyes"
+    await h._on_input_transcript("we agreed to ship on Friday")
+    session.speaker = "Omar Haddad"
+    await h._on_input_transcript("and the budget stays as it is")
+    turns = list(h._transcript.turns)
+    assert [t.speaker for t in turns] == ["Dana", "Omar"]
+    assert [t.text for t in turns] == [
+        "we agreed to ship on Friday",
+        "and the budget stays as it is",
+    ]
+
+
+async def test_mixed_audio_still_files_turns_under_the_caller() -> None:
+    session = FakeSession(_start())
+    h, _rt = await _started(session)
+    assert session.speaker is None
+    await h._on_input_transcript("hello there")
+    assert [t.speaker for t in h._transcript.turns] == ["Alaa"]
+
+
 async def test_a_verbal_interrupt_cuts_playback_and_suppresses_the_reply() -> None:
     session = FakeSession(_start())
     h, rt = await _started(session)
@@ -828,6 +1081,12 @@ def test_the_environment_is_the_fallback(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_the_config_block_beats_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MSTEAMS_BRIDGE_SESSION_SCOPE", "per-thread")
     assert hconfig.resolve_config({"session_scope": "per-aad"}).session_scope == "per-aad"
+
+
+def test_meeting_recap_is_off_unless_asked() -> None:
+    """A recap is customer conversation leaving the call. Off is the default."""
+    assert hconfig.resolve_config({}).meeting_recap is False
+    assert hconfig.resolve_config({"meeting_recap": True}).meeting_recap is True
 
 
 def test_unknown_config_keys_are_kept() -> None:

@@ -73,6 +73,8 @@ lets you reference the environment instead.
           "path": "/msteams/calling",
           "maxConcurrentCalls": 4,
           "requireRecordingStatus": false,
+          "sessionScope": "per-call",
+          "meetingRecap": false,
           "realtime": {
             "provider": "openai",
             "providers": {

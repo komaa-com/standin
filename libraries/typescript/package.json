@@ -1,6 +1,6 @@
 {
   "name": "@komaa/standin-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Put your AI agent into a Microsoft Teams call. The StandIn SDK and every framework plugin, in one package.",
   "license": "MIT",
   "author": "Komaa DigiTech <support@komaa.com>",

@@ -527,6 +527,14 @@ export interface ChatChannelOptions {
    * its minutes.
    */
   chats?: PersonalChats;
+  /**
+   * Take messages without answering them. Every inbound message still feeds
+   * `chats`, so a call can find where to post its minutes, but `respond` is
+   * never called and nothing is sent back: no typing indicator, no reply. For
+   * a lane that exists only to post, such as a meeting recap, when something
+   * else already answers this connection's chat.
+   */
+  listenOnly?: boolean;
 }
 
 /**
@@ -550,6 +558,7 @@ export class ChatChannel {
   readonly #url: string;
   readonly #seen = new Seen();
   readonly #chats: PersonalChats | undefined;
+  readonly #listenOnly: boolean;
   #ws: WebSocket | undefined;
   #closed = false;
   /**
@@ -572,6 +581,7 @@ export class ChatChannel {
     this.#respond = options.respond;
     this.#url = options.url ?? process.env.STANDIN_CHAT_URL ?? DEFAULT_CHAT_URL;
     this.#chats = options.chats;
+    this.#listenOnly = options.listenOnly === true;
   }
 
   /** Dial StandIn and begin taking messages. */
@@ -640,6 +650,9 @@ export class ChatChannel {
     // Before the dedupe: a redelivery is still evidence that this person has a
     // chat with this bot, and remembering it twice changes nothing.
     this.#chats?.remember(inbound);
+    // A listen-only lane remembers and says nothing. Not even the typing
+    // indicator: that is a promise of an answer this lane will not give.
+    if (this.#listenOnly) return;
     // The turn, though, runs once: StandIn is at-least-once, and a redelivery
     // must not start a second turn for the same activity.
     const key = `${inbound.tenantId}:${inbound.conversationId}:${inbound.activityId}`;

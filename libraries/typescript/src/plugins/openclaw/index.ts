@@ -50,7 +50,7 @@ import {
 import { resolvePluginConfig } from "./config.js";
 import { StandInCallRuntime } from "./runtime.js";
 
-export { resolvePluginConfig, type ResolvedPluginConfig } from "./config.js";
+export { resolvePluginConfig, sessionKey, type ResolvedPluginConfig } from "./config.js";
 export {
   TeamsCallHandler,
   type CallRegistry,
@@ -61,6 +61,13 @@ export {
   type RealtimeCall,
   type RealtimeCallDeps,
 } from "./realtime.js";
+export {
+  drainMeetingRecap,
+  enqueueMeetingRecap,
+  recapDir,
+  runMeetingRecap,
+  transcriptOnly,
+} from "./recap.js";
 export { StandInCallRuntime } from "./runtime.js";
 
 /**

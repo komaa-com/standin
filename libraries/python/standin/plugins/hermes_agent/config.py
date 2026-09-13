@@ -52,6 +52,11 @@ class PluginConfig:
     #: the humans in the room that a bot is participating.
     require_recording: bool = True
 
+    #: After the call ends, write minutes into the Microsoft Teams chat. Off
+    #: unless the operator asks: a recap is customer conversation leaving the
+    #: call, and the default must not post one nobody requested.
+    meeting_recap: bool = False
+
     #: Agent memory continuity: ``per-call`` (a fresh session every time),
     #: ``per-thread`` (one session per Microsoft Teams conversation) or ``per-aad`` (one
     #: session per person, across every call they make).
@@ -129,6 +134,7 @@ def _list(block: dict, key: str, env: str) -> tuple[str, ...]:
 _KNOWN = frozenset(
     {
         "require_recording",
+        "meeting_recap",
         "session_scope",
         "wake_phrases",
         "require_address",
@@ -178,6 +184,7 @@ def resolve_config(block: dict | None = None) -> PluginConfig:
         require_recording=_bool(
             block, "require_recording", "MSTEAMS_BRIDGE_REQUIRE_RECORDING", True
         ),
+        meeting_recap=_bool(block, "meeting_recap", "MSTEAMS_BRIDGE_MEETING_RECAP", False),
         session_scope=scope,
         wake_phrases=_list(block, "wake_phrases", "MSTEAMS_BRIDGE_WAKE_PHRASES")
         or DEFAULT_WAKE_PHRASES,

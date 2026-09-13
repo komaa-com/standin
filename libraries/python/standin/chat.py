@@ -467,6 +467,11 @@ class ChatChannel:
         chats: a :class:`PersonalChats` to feed. Every personal message that
             arrives is remembered in it, which is what later lets a call post
             back to the caller who sent one.
+        listen_only: take messages without answering them. ``chats`` is still
+            fed, so a call can find where to post its minutes, but ``respond``
+            is never called and nothing is sent back, not even the typing
+            indicator. For a lane that exists only to post, such as a meeting
+            recap, when something else already answers this connection's chat.
 
     Example:
         ```python
@@ -490,6 +495,7 @@ class ChatChannel:
         secret: str | None = None,
         url: str | None = None,
         chats: PersonalChats | None = None,
+        listen_only: bool = False,
     ) -> None:
         self._secret = (
             secret
@@ -504,6 +510,7 @@ class ChatChannel:
             )
         self._respond = respond
         self._chats = chats
+        self._listen_only = bool(listen_only)
         self._url = url or os.environ.get("STANDIN_CHAT_URL") or DEFAULT_CHAT_URL
         self._seen = _Seen()
         self._http: aiohttp.ClientSession | None = None
@@ -573,6 +580,11 @@ class ChatChannel:
                     # who is on the phone, and a repeat is not.
                     if self._chats is not None:
                         self._chats.remember(inbound)
+                    # A listen-only lane remembers and says nothing, not even
+                    # the typing indicator: that promises an answer it will
+                    # not give.
+                    if self._listen_only:
+                        continue
                     self._enqueue(inbound)
         except asyncio.CancelledError:
             raise

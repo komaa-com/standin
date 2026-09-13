@@ -22,6 +22,8 @@ import {
   contextSentences,
   type CallHandler,
   type CallSession,
+  type ChatChannel,
+  type PersonalChats,
 } from "../../index.js";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type {
@@ -30,12 +32,13 @@ import type {
 } from "openclaw/plugin-sdk/realtime-voice";
 
 import { describeInboundRejection, isInboundCallAllowed } from "./allowlist.js";
-import type { ResolvedPluginConfig } from "./config.js";
+import { sessionKey, type ResolvedPluginConfig } from "./config.js";
 import {
   createRealtimeCall,
   type CallLogger,
   type RealtimeCall,
 } from "./realtime.js";
+import { enqueueMeetingRecap } from "./recap.js";
 
 /** The host realtime provider, resolved once at startup and shared by every call. */
 export interface ResolvedRealtime {
@@ -74,6 +77,11 @@ export interface HandlerDeps {
   cfg?: OpenClawConfig;
   registry: CallRegistry;
   logger?: CallLogger;
+  /** Outbound chat lane, started only when meetingRecap is on. */
+  chat?: Pick<ChatChannel, "send">;
+  chats?: PersonalChats;
+  /** Text agent used to write minutes. The first argument is the session-scope key. */
+  consult?: (sessionKey: string, prompt: string) => Promise<string>;
 }
 
 /**
@@ -86,6 +94,8 @@ export interface HandlerDeps {
 export class TeamsCallHandler implements CallHandler {
   readonly #deps: HandlerDeps;
   #call: RealtimeCall | undefined;
+  #session: CallSession | undefined;
+  #sessionKey = "";
   #callId = "";
   /** Set only once a slot is actually reserved, so a refusal never frees someone else's. */
   #held = false;
@@ -97,6 +107,12 @@ export class TeamsCallHandler implements CallHandler {
   async onStart(session: CallSession): Promise<void> {
     const { config, realtime, registry, logger } = this.#deps;
     this.#callId = session.callId;
+    this.#session = session;
+    this.#sessionKey = sessionKey(config.voice.sessionScope, {
+      callId: session.callId,
+      threadId: session.start.threadId,
+      caller: { aadId: session.start.caller.aadId },
+    });
 
     // REFUSAL 1: no realtime provider. The startup log already said this would
     // happen; the close reason is what makes it visible on the call itself
@@ -172,7 +188,8 @@ export class TeamsCallHandler implements CallHandler {
       `standin-msteams: call ${session.callId} live` +
         (session.start.caller.displayName
           ? ` with ${session.start.caller.displayName}`
-          : ""),
+          : "") +
+        ` (${this.#sessionKey})`,
     );
   }
 
@@ -216,8 +233,11 @@ export class TeamsCallHandler implements CallHandler {
 
   /** Always called exactly once, on every path, before the slot is freed. */
   async aclose(reason: string): Promise<void> {
+    const session = this.#session;
+    const transcript = this.#call?.transcript;
     this.#call?.close();
     this.#call = undefined;
+    this.#session = undefined;
     if (this.#held) {
       this.#deps.registry.release(this.#callId);
       this.#held = false;
@@ -225,5 +245,24 @@ export class TeamsCallHandler implements CallHandler {
     this.#deps.logger?.info?.(
       `standin-msteams: call ${this.#callId} ended (${reason})`,
     );
+    // Detached on purpose. The SDK awaits aclose before it sends session.end,
+    // closes the socket and frees the connection slot, and a recap consult can
+    // take tens of seconds. The transcript is on disk before enqueue returns, so
+    // a process restart still posts. enqueueMeetingRecap never throws, so
+    // nothing in aclose is lost by not awaiting it.
+    if (session && transcript) {
+      void enqueueMeetingRecap({
+        enabled: this.#deps.config.voice.meetingRecap,
+        session,
+        transcript,
+        chat: this.#deps.chat,
+        chats: this.#deps.chats,
+        sessionKey: this.#sessionKey,
+        summarise: this.#deps.consult
+          ? (prompt) => this.#deps.consult!(this.#sessionKey, prompt)
+          : undefined,
+        logger: this.#deps.logger,
+      });
+    }
   }
 }

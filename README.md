@@ -9,6 +9,7 @@
   <a href="#how-it-works">How It Works</a> &nbsp;·&nbsp;
   <a href="#quickstart">Quickstart</a> &nbsp;·&nbsp;
   <a href="#plugins">Plugins</a> &nbsp;·&nbsp;
+  <a href="#agent-skills">Agent Skills</a> &nbsp;·&nbsp;
   <a href="#documentation">Documentation</a>
 </p>
 
@@ -162,6 +163,25 @@ Python, or the optional peer packages named by the plugin in TypeScript.
 
 Missing yours? Adding one is a copy of the echo plugin plus a few lines of glue. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Agent Skills
+
+A coding agent can install these and wire StandIn for you: connection secret, OpenClaw,
+Hermes Agent, and publishing `/msteams/calling`.
+
+```bash
+npx skills add komaa-com/skills
+```
+
+| Skill | What it teaches the agent |
+|---|---|
+| [setup-standin](https://github.com/komaa-com/skills/tree/main/setup-standin) | Get a StandIn connection from the portal and install the SDK. |
+| [standin-openclaw](https://github.com/komaa-com/skills/tree/main/standin-openclaw) | Load the OpenClaw plugin (`standin-msteams`) and merge `openclaw.json`. |
+| [standin-hermes-agent](https://github.com/komaa-com/skills/tree/main/standin-hermes-agent) | Enable the Hermes Agent plugin and serve the call listener. |
+| [expose-standin](https://github.com/komaa-com/skills/tree/main/expose-standin) | Publish `/msteams/calling`, probe the mount, and register the agent calling URL. |
+
+Install one skill with `npx skills add komaa-com/skills --skill standin-openclaw`.
+The skills live in [komaa-com/skills](https://github.com/komaa-com/skills), not in this repository.
 
 ## Documentation
 
