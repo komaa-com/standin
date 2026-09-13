@@ -157,7 +157,13 @@ See [Call tools](/python-sdk/call-tools) and
 
 - **Meeting recap.** `Transcript` collects the turns, `post_meeting_minutes` is the tool a model
   calls to file them mid-call, and `post_minutes` is the function that writes them up and posts
-  them. `minutes_prompt` asks for Key Points, Decisions, Action Items and, when the agent saw
+  them. The OpenClaw and Hermes plugins also do this at hang-up when you turn `meetingRecap` /
+  `meeting_recap` on: they write a restart-recoverable local spool first, then post through a
+  listen-only chat lane. Off by default. Delivery needs the managed-bot chat lane
+  ([Tiers](/tiers)) and a summarization consult. Hang-up does not await the consult. Meeting recaps
+  are best-effort. They may be lost if the worker exits during processing, or if the spool directory
+  is on disk that dies with the process. Point `STANDIN_RECAP_DIR` at a directory that survives a
+  container restart when you need unfinished recaps to post after one. `minutes_prompt` asks for Key Points, Decisions, Action Items and, when the agent saw
   something, Presented, and it forbids inferring what was on screen: minutes that invent the numbers
   on a dashboard are worse than minutes with a gap.
 - **Minutes that say who said it.** Each `Turn` keeps its speaker apart from its words, and
@@ -368,8 +374,8 @@ Being clear about this saves you a wasted afternoon.
 | Not in the SDK | Where it is instead |
 |---|---|
 | Speech recognition, speech synthesis, agent reasoning | Your framework and your provider. The SDK has no recognizer, no voice and no model. It ships the plumbing that runs yours. |
-| Drawing the avatar tile | The hosted service. Your worker sends the hints and the frames; how a face is rendered from them is StandIn's business and nothing in your worker needs to know it. |
-| Joining the Microsoft Teams call | The hosted service. It owns the bot registration, Graph and the media negotiation, which is the reason there is no media infrastructure for you to stand up. |
+| Drawing the avatar tile | StandIn. Your worker sends the hints and the frames; StandIn draws the face. |
+| Joining the Microsoft Teams call | StandIn. It joins the call and dials your worker. |
 | A browser | Yours. `PageRenderer` is the seam: you supply the thing that turns a URL into an image. `show_page` is deliberately **not** one of the built-in tools, because a deployment with no renderer would otherwise promise every model it can show a page and then apologise on every call. Register it when you have one. |
 | A PDF or Office rendering engine | Not in the base install. `pip install "standin-sdk[render]"` adds it, and it is **Python only**: the TypeScript SDK has no document renderer and reads no `STANDIN_SHOW_ROOTS`. |
 

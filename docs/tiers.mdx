@@ -44,16 +44,29 @@ free choice is a metering choice, not a different setup.
 | Identity in Microsoft Teams | appears as StandIn | appears as your own bot | appears as StandIn |
 | Inbound calls dialed in your organization | no | yes | yes |
 | Chat | none | your runtime's own Microsoft Teams channel | `ChatChannel`, dialed out of your worker |
+| Meeting recap (`meetingRecap` / `meeting_recap`) | cannot post: no chat lane | not this SDK's `ChatChannel`; wire `post_minutes` through your own channel | posts through `ChatChannel` |
 | Daily budget | 5 minutes of bot time a day, per room, plus [the rest of the sandbox limits](/community#limits) | 5 minutes of call time a day, per identity | what your StandIn plan allows |
 | One-time admin work | none | an admin consent before calling works | an admin consent before calling works |
 | Where you set it up | [the sandbox page](/community) | [Microsoft Teams setup](/teams/overview) | [Connection modes](/teams/connection-modes#standin-managed-bot) |
 
 Chat is the row people misread, so read it twice. The chat lane in this SDK is what the **managed
 bot** unlocks: it dials out, so it needs no port and no tunnel. A bring-your-own-bot identity gets
-chat from its own runtime's Microsoft Teams channel instead, which is a different process from calls
-and has its own local target, and a sandbox room has neither of those things.
-[Endpoints](/teams/connection-modes#endpoints) carries every public path with the local target behind
-it, and it is the only place that list lives.
+chat from its own Azure Bot messaging URL instead, which is not this SDK, and a sandbox room has
+neither of those things.
+[Endpoints](/teams/connection-modes#endpoints) is the only place that list lives.
+
+Meeting recap in the OpenClaw and Hermes plugins uses that same outbound chat socket. Turn the
+switch on on a sandbox or bring-your-own-bot identity and hang-up writes the transcript, then has
+nowhere this SDK can post. Meeting recaps are best-effort. They may be lost if the worker exits
+during processing.
+
+## Plans and billing
+
+Daily minutes and managed-bot capacity live on the identity in the
+[StandIn portal](https://standin.komaa.com/dashboard). Choose a plan there,
+set how long the teammate can talk, and turn on extras such as a knowledge
+base. The SDK authenticates with the connection secret. The portal owns
+the plan.
 
 Both budget rows run on the same clock, and it is not your clock:
 [the daily budget entry](/troubleshooting#community-tier-bot-leaves-or-will-not-join-daily-budget)

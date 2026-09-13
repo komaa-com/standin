@@ -23,10 +23,13 @@
  *   passed when the operator set it and the SDK's default stands when they did not.
  */
 
-import { CallServer } from "../../index.js";
+import { CallServer, ChatChannel, PersonalChats } from "../../index.js";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
-import { resolveConfiguredRealtimeVoiceProvider } from "openclaw/plugin-sdk/realtime-voice";
+import {
+  consultRealtimeVoiceAgent,
+  resolveConfiguredRealtimeVoiceProvider,
+} from "openclaw/plugin-sdk/realtime-voice";
 
 import type { ResolvedPluginConfig } from "./config.js";
 import {
@@ -34,6 +37,7 @@ import {
   type CallRegistry,
   type ResolvedRealtime,
 } from "./handler.js";
+import { drainMeetingRecap } from "./recap.js";
 import type { RealtimeCall } from "./realtime.js";
 
 /**
@@ -85,6 +89,8 @@ export class StandInCallRuntime {
   readonly #calls: LiveCalls;
   #server: CallServer | undefined;
   #realtime: ResolvedRealtime | undefined;
+  #chat: ChatChannel | undefined;
+  #chats: PersonalChats | undefined;
 
   constructor(api: OpenClawPluginApi, config: ResolvedPluginConfig) {
     this.#api = api;
@@ -116,6 +122,38 @@ export class StandInCallRuntime {
       );
     }
 
+    if (this.#config.voice.meetingRecap) {
+      this.#chats = new PersonalChats();
+      try {
+        // Listen-only: this lane exists to POST minutes, and to remember who has
+        // a 1:1 chat with the bot so a personal call has somewhere to post them.
+        // It answers nothing. A canned reply here would compete with whatever
+        // already answers this connection's chat and teach people the bot is
+        // deaf.
+        const chat = new ChatChannel({
+          secret: this.#config.media.secret,
+          chats: this.#chats,
+          listenOnly: true,
+          respond: async () => "",
+        });
+        await chat.start();
+        this.#chat = chat;
+        log.info(
+          "standin-msteams: chat lane open for meeting recap (posts minutes, answers nothing)",
+        );
+        void drainMeetingRecap({
+          chat,
+          chats: this.#chats,
+          summarise: (key, prompt) => this.#summarise(key, prompt),
+          logger: log,
+        });
+      } catch (err) {
+        log.warn(
+          `standin-msteams: chat lane for recap did not open - ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     const server = new CallServer({
       handlerFactory: () =>
         new TeamsCallHandler({
@@ -124,6 +162,9 @@ export class StandInCallRuntime {
           cfg: this.#api.config as unknown as OpenClawConfig,
           registry: this.#calls,
           logger: log,
+          chat: this.#chat,
+          chats: this.#chats,
+          consult: (key, prompt) => this.#summarise(key, prompt),
         }),
       secret: this.#config.media.secret,
       port: this.#config.media.port,
@@ -154,7 +195,47 @@ export class StandInCallRuntime {
     const server = this.#server;
     this.#server = undefined;
     if (server) await server.aclose();
+    const chat = this.#chat;
+    this.#chat = undefined;
+    this.#chats = undefined;
+    if (chat) await chat.aclose();
     this.#api.logger.info("standin-msteams: stopped");
+  }
+
+  /**
+   * Ask the host's text agent to write minutes. Session scope is the consult
+   * key, so per-aad / per-thread memory carries across calls.
+   *
+   * Returns "" when the agent produced nothing or failed, and postMinutes then
+   * posts nothing. The raw transcript is NOT a fallback: a misconfigured agent
+   * must not end every call with a verbatim dump of the whole conversation in
+   * the meeting thread.
+   */
+  async #summarise(sessionKey: string, prompt: string): Promise<string> {
+    try {
+      const result = await consultRealtimeVoiceAgent({
+        cfg: this.#api.config as unknown as OpenClawConfig,
+        agentRuntime: this.#api.runtime.agent,
+        logger: this.#api.logger,
+        sessionKey,
+        messageProvider: "standin-msteams",
+        lane: "voice",
+        runIdPrefix: "standin-recap",
+        args: { question: prompt },
+        transcript: [],
+        surface: "microsoft-teams",
+        userLabel: "Caller",
+        assistantLabel: "Assistant",
+        extraSystemPrompt: "Output only the meeting minutes, briefly and factually.",
+        fallbackText: "",
+      });
+      return (result.text ?? "").trim();
+    } catch (err) {
+      this.#api.logger.warn(
+        `standin-msteams: recap consult failed - ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return "";
+    }
   }
 
   /**

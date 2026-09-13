@@ -75,4 +75,12 @@ describe("built plugin directory, against the installed OpenClaw host", () => {
     expect(result.manifest.id).toBe("standin-msteams");
     expect(result.manifest.activation.onStartup).toBe(true);
   });
+
+  it("ships the documented load path in the published package layout", () => {
+    const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+    expect(pkg.files).toEqual(expect.arrayContaining(["dist"]));
+    expect(existsSync(join(pluginDir, "openclaw.plugin.json"))).toBe(true);
+    expect(existsSync(join(pluginDir, "index.js"))).toBe(true);
+    expect(existsSync(join(pluginDir, "package.json"))).toBe(true);
+  });
 });

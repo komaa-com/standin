@@ -108,7 +108,8 @@ both already exist in the field.
 | `allow_all` | `MSTEAMS_BRIDGE_ALLOW_ALL` | `false` | Accept any caller. Explicit opt-in. |
 | `allowlist_allow_names` | `MSTEAMS_BRIDGE_ALLOWLIST_ALLOW_NAMES` | `false` | Match display names too. Spoofable; off by default. |
 | `require_recording` | `MSTEAMS_BRIDGE_REQUIRE_RECORDING` | `true` | Wait for the Microsoft Teams recording banner before speaking or listening. |
-| `session_scope` | `MSTEAMS_BRIDGE_SESSION_SCOPE` | `per-call` | Agent memory: `per-call`, `per-thread`, `per-aad`. |
+| `meeting_recap` | `MSTEAMS_BRIDGE_MEETING_RECAP` | `false` | After the call ends, post minutes to the Microsoft Teams chat. Needs the StandIn chat lane (managed bot) and a summarization consult. Hang-up does not await the post. Meeting recaps are best-effort. They may be lost if the worker exits during processing. If the host gave no `respond`, the plugin opens a listen-only chat lane that posts and never answers. Restart-recoverable local spool of customer meeting data (`STANDIN_RECAP_DIR`). |
+| `session_scope` | `MSTEAMS_BRIDGE_SESSION_SCOPE` | `per-call` | Memory of the agent session used for consults and the minutes: `per-call`, `per-thread`, `per-aad`. |
 | `wake_phrases` | `MSTEAMS_BRIDGE_WAKE_PHRASES` | `assistant, hermes` | What addresses the assistant in a meeting. |
 | `require_address` | `MSTEAMS_BRIDGE_REQUIRE_ADDRESS` | `true` | Stay silent in a meeting until addressed. |
 | `follow_up_window_ms` | `MSTEAMS_BRIDGE_FOLLOW_UP_WINDOW_MS` | `12000` | How long an addressed turn keeps the floor. |

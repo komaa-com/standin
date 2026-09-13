@@ -12,7 +12,7 @@
 
 import type { AddressInfo } from "node:net";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 
 import {
@@ -296,6 +296,7 @@ describe("the channel feeding that memory", () => {
   /** A channel wired to a memory, and the socket the gateway would speak on. */
   async function lane(
     respond: (message: InboundMessage) => Promise<string> = async () => "ok",
+    options: { listenOnly?: boolean } = {},
   ): Promise<{ socket: WebSocket; chats: PersonalChats }> {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     servers.push(server);
@@ -314,12 +315,32 @@ describe("the channel feeding that memory", () => {
       secret: "chat-memory-test-secret",
       url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}`,
       chats,
+      ...options,
     });
     channels.push(channel);
     await channel.start();
     await until(() => connected.length === 1, "the channel to dial in");
     return { socket: connected[0]!, chats };
   }
+
+  it("a listen-only lane remembers who wrote and answers nothing, not even typing", async () => {
+    const respond = vi.fn(async () => "ok");
+    const { socket, chats } = await lane(respond, { listenOnly: true });
+    const backFromChannel: string[] = [];
+    socket.on("message", (data) => backFromChannel.push(String(data)));
+
+    socket.send(body());
+    await until(
+      () =>
+        chats.forCaller({ callerAadId: "dana-aad", tenantId: TENANT }) !==
+        undefined,
+      "the message to be remembered",
+    );
+    // Give a reply every chance to arrive before asserting there was none.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(respond).not.toHaveBeenCalled();
+    expect(backFromChannel).toEqual([]);
+  });
 
   /** One inbound message on the wire, as the gateway spells it. */
   function body(over: Record<string, unknown> = {}): string {

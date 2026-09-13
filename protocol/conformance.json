@@ -766,10 +766,10 @@
     }
   },
   "hmacBody": {
-    "$comment": "Chat POSTs sign the exact bytes, with a 300000 ms replay window. WebSocket chat signs the channel name and stays at 60000 ms. Expected signatures match StandIn Autopilot; the estate chat reference is also pinned by the gateway and portal.",
+    "$comment": "Chat POSTs sign the exact bytes, with a 300000 ms replay window. WebSocket chat signs the channel name and stays at 60000 ms. These values are pinned independently on the StandIn service side, so a change here that the service does not make is a break, not a fix.",
     "sign": [
       {
-        "name": "estate chat reference",
+        "name": "chat body reference",
         "secret": "test-secret",
         "timestampMs": "1700000000000",
         "body": "hello",
@@ -867,7 +867,7 @@
     "$comment": "HMAC-SHA256(secret, timestampMs + \".\" + METHOD + \"\\n\" + path + \"\\n\" + sha256_hex(raw_body)). These values are pinned independently on the StandIn service side, so a change here that the service does not make is a break, not a fix.",
     "sign": [
       {
-        "name": "worker and portal canonical reference",
+        "name": "canonical v2 request reference",
         "secret": "sec",
         "timestampMs": "1700000000000",
         "method": "POST",
@@ -877,7 +877,7 @@
         "expected": "269b10f137bd1df14cdd87608e0f94aa638f5624b5fc98f3f5c895c588853722"
       },
       {
-        "name": "Autopilot outbound call with tenant",
+        "name": "outbound call with tenant",
         "secret": "shared-xyz",
         "timestampMs": "1700000000000",
         "method": "post",

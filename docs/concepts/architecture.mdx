@@ -19,7 +19,7 @@ flowchart LR
 
 | Owner | Responsibility |
 |---|---|
-| **StandIn** (hosted) | Joins the Microsoft Teams call, owns the bot registration, Graph, and media negotiation. Dials your worker once per call. Places the reply audio back into the call. |
+| **StandIn** (hosted) | Handles the Microsoft Teams side. Dials your worker once per call. Places the reply audio back into the call. |
 | **The SDK** (`CallServer`) | The socket StandIn dials, the HMAC handshake and its single-use replay guard, capacity, draining, the wire protocol, outbound sequence numbers and the audio timeline, five bounds on a call that nobody closes, and idempotent teardown. |
 | **Your plugin** | What to do with the caller's voice, and where the reply comes from. The recognizer, the model and the voice are yours; everything between them and the wire is already in the SDK. |
 
@@ -91,10 +91,8 @@ is wide, and the same seventeen members are on it in both languages.
 <Note>
 **The SDK sends the hints and receives the frames. StandIn draws the tile.** `express`,
 `send_speech_marks`, `display_image` and `send_tile_frame` go out; `latest_video_frame` and
-`on_video_frame` come in. How the face is rendered from those hints is the service's business, and
-nothing in your worker needs to know it. Everything on that lane is additive and best-effort: a
-service that does not implement one of these ignores it rather than failing the call, and none of it
-changes a sample of what the caller hears.
+`on_video_frame` come in. A missing hint is ignored, not a failed call, and none of it changes
+a sample of what the caller hears.
 </Note>
 
 <Warning>

@@ -39,6 +39,20 @@ export interface ResolvedPluginConfig {
      * either way, and a gate nobody asked for is a call of silence.
      */
     requireRecordingStatus: boolean;
+    /**
+     * Memory continuity for the agent session that writes the minutes (the
+     * recap consult's session key). `per-call` is a fresh session every time,
+     * `per-thread` is one session per Microsoft Teams conversation, `per-aad`
+     * is one session per person. The realtime voice session is always per call.
+     */
+    sessionScope: "per-call" | "per-thread" | "per-aad";
+    /**
+     * After the call ends, write minutes into the Microsoft Teams chat.
+     * Uses the SDK's Transcript and postMinutes. Off unless exactly true. When
+     * on, the runtime opens a listen-only chat lane to post through; it never
+     * answers a chat message.
+     */
+    meetingRecap: boolean;
     realtime: {
       provider?: string;
       providers?: Record<string, Record<string, unknown>>;
@@ -91,6 +105,8 @@ export function resolvePluginConfig(rawInput: unknown): ResolvedPluginConfig {
         : undefined,
       inboundGreeting: str(c.inboundGreeting) || undefined,
       requireRecordingStatus: c.requireRecordingStatus === true,
+      sessionScope: sessionScopeOf(c.sessionScope),
+      meetingRecap: c.meetingRecap === true,
       realtime: {
         provider: str(r.provider) || undefined,
         providers: asObject(r.providers) as
@@ -109,4 +125,26 @@ export function resolvePluginConfig(rawInput: unknown): ResolvedPluginConfig {
       },
     },
   };
+}
+
+const SCOPES = new Set(["per-call", "per-thread", "per-aad"]);
+
+/** An unrecognised scope must not silently become the widest one. */
+function sessionScopeOf(raw: unknown): "per-call" | "per-thread" | "per-aad" {
+  const value = str(raw).toLowerCase();
+  return SCOPES.has(value)
+    ? (value as "per-call" | "per-thread" | "per-aad")
+    : "per-call";
+}
+
+/** The agent session id for this call, per `sessionScope`. */
+export function sessionKey(
+  scope: "per-call" | "per-thread" | "per-aad",
+  start: { callId?: string; threadId?: string; caller?: { aadId?: string } },
+): string {
+  let key = start.callId ?? "";
+  if (scope === "per-thread") key = start.threadId || start.callId || "";
+  else if (scope === "per-aad")
+    key = (start.caller?.aadId || "") || start.callId || "";
+  return `teams:${key}`;
 }

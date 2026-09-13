@@ -51,12 +51,14 @@ from standin.delivery import LiveCalls
 from standin.echo_guard import EchoGuard
 from standin.gate import GroupGate, is_verbal_interrupt
 from standin.lipsync import TurnLipSync
+from standin.minutes import Transcript
 
 from .api import skills_index_text, soul_text
 from .config import PluginConfig, caller_allowed, resolve_config, session_key
 from .consult import AgentConsult
 from .log import logger
 from .realtime import RealtimeConfig, RealtimeSession, realtime_config
+from .recap import schedule_meeting_recap
 from .tools import ToolRunner, default_tools
 
 __all__ = ["LIVE_CALLS", "RealtimeHandler"]
@@ -150,6 +152,7 @@ class RealtimeHandler:
         self._lip = TurnLipSync()
         self._cue = ExpressionCue()
         self._reply_text: list[str] = []
+        self._transcript = Transcript()
 
         self._closed = False
         self._greeted = False
@@ -187,6 +190,7 @@ class RealtimeHandler:
         self._lip = TurnLipSync()
         self._cue = ExpressionCue()
         self._reply_text = []
+        self._transcript = Transcript()
         self._gate = GroupGate(
             wake_phrases=self._plugin.wake_phrases,
             require_address=self._plugin.require_address,
@@ -336,6 +340,9 @@ class RealtimeHandler:
         """Close the provider session. Called exactly once, on every path."""
         self._closed = True
         call = self._call
+        transcript = self._transcript
+        consult = self._consult
+        recap = self._plugin.meeting_recap
         if call is not None:
             LIVE_CALLS.unregister(self, call_id=call.call_id, thread_id=call.start.thread_id)
         rt, self._rt = self._rt, None
@@ -343,6 +350,18 @@ class RealtimeHandler:
             with contextlib.suppress(Exception):
                 await rt.close()
         self._call = None
+        # Detached on purpose: the SDK awaits this method before it ends the
+        # session and frees the slot, and a recap consult can take tens of
+        # seconds. The transcript is on disk before schedule returns, so a
+        # process restart still posts. schedule_meeting_recap never raises.
+        if recap and call is not None:
+            schedule_meeting_recap(
+                session=call,
+                transcript=transcript,
+                consult=consult,
+                enabled=True,
+                session_id=session_key(self._plugin, call.start),
+            )
 
     # ---- instructions ----------------------------------------------------
 
@@ -417,6 +436,22 @@ class RealtimeHandler:
         name = (call.start.caller.display_name or "") if call is not None else ""
         return name.strip().split(" ")[0] if name.strip() else ""
 
+    def _turn_speaker(self) -> str:
+        """Who to file a caller turn under.
+
+        On unmixed audio the session names the active speaker, and that is the
+        person to credit: in a meeting, filing every attendee under the caller
+        who dialled in is confidently wrong attribution, and the transcript
+        merge would then fold their words into one block. On the mixed path
+        the speaker is None and the caller's own name is the best available.
+        """
+        call = self._call
+        speaker = (getattr(call, "speaker", None) or "") if call is not None else ""
+        speaker = speaker.strip()
+        if speaker:
+            return speaker.split(" ")[0]
+        return self._caller_first_name() or "Caller"
+
     # ---- provider callbacks ----------------------------------------------
 
     async def _on_model_audio(self, pcm24: bytes) -> None:
@@ -462,6 +497,8 @@ class RealtimeHandler:
         """
         call = self._call
         text, self._reply_text = "".join(self._reply_text), []
+        if text.strip():
+            self._transcript.add("Assistant", text, role="assistant")
         marks = []
         with contextlib.suppress(Exception):
             marks = self._lip.finish(text)
@@ -521,6 +558,8 @@ class RealtimeHandler:
         if rt is None or self._closed:
             return
         self._echo.mark_caller_turn()
+        if text.strip():
+            self._transcript.add(self._turn_speaker(), text, role="caller")
 
         if is_verbal_interrupt(text, self._plugin.wake_phrases):
             # Suppress any reply to the interruption itself: "stop" does not

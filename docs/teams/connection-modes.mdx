@@ -32,7 +32,7 @@ a connection you create in the StandIn portal.
 4. A Microsoft 365 administrator approves calling once for the organization. Chat works before this;
    calling switches on when the approval lands.
 
-You get a **connection secret**, and on the consolidated SDK it is one environment variable:
+You get a **connection secret**, and on this SDK it is one environment variable:
 
 ```bash
 export STANDIN_SECRET='<the connection secret from the portal>'
@@ -50,13 +50,6 @@ tunnel rule, and your agent never holds a Bot Framework credential. It needs no 
 socket opens, you are managed.
 
 <Note>
-Running one of the older standalone bridges instead? Their managed chat lane is an inbound listener
-with its own port and path, configured in the runtime's plugin block rather than in the environment.
-That belongs to the bridge rather than to this SDK, which is why it is not documented here: this
-SDK's chat lane is dialled outbound and needs neither a port nor a mount.
-</Note>
-
-<Note>
 One agent instance serves **one** connection. The secrets belong to a single Microsoft organization -
 run a second instance for a second organization, and never share a secret across tenants.
 </Note>
@@ -72,23 +65,21 @@ to be visibly yours.
 
 ## Endpoints
 
-StandIn dials your agent, so the endpoint you save in the portal has to match the path your agent
-actually listens on. Give the portal a bare host and it fills in the default below; paste a full URL
-instead if your bridge serves something else.
+StandIn dials your worker, so the URL you save in the portal has to match the path the worker
+listens on. Give the portal a bare host and it fills in the default below; paste a full URL if the
+worker uses a different path.
 
-**Calling is the same in both modes.** Only chat differs, and that is the line people get wrong:
+**Calling is the same in both modes.** Only chat differs:
 
-| Lane | Public path | Local target |
-|---|---|---|
-| Calling (media WebSocket), both modes | `wss://host/msteams/calling` | `127.0.0.1:9442`, path `/msteams/calling` |
-| Chat, **StandIn Managed Bot**, consolidated SDK | none: the worker dials out | nothing to expose |
-| Chat, **bring your own Azure bot** | `https://host/api/messages` | `127.0.0.1:3978`, path `/api/messages` |
-| Chat, **StandIn Managed Bot**, legacy standalone bridge | `https://host/msteams/messages` | `127.0.0.1:9444`, path `/msteams/messages` |
+| Lane | Public contract | Auth | What you expose |
+|---|---|---|---|
+| Calling, both modes | WebSocket `wss://host/msteams/calling/{callId}` | HMAC handshake with `STANDIN_SECRET` | the call listener (`STANDIN_PORT` / `STANDIN_WS_PATH`, defaults `9442` and `/msteams/calling`) |
+| Chat, **StandIn Managed Bot** | the worker dials `STANDIN_CHAT_URL` (default `wss://teams.standin.komaa.com/api/chat/channel`) | HMAC with `STANDIN_CHAT_SECRET`, else `STANDIN_SECRET` | nothing inbound |
+| Chat, **bring your own Azure bot** | the messaging URL on your Azure Bot | your Azure Bot credentials, not this SDK | not this SDK; the portal shows the value to register |
 
-A **bring-your-own-bot** identity uses `/api/messages`, served by your runtime's own Microsoft Teams channel
-(OpenClaw's `msteams` channel, the Hermes gateway's Microsoft Teams platform) rather than by anything in this
-SDK. That is a different process from calls, which is why it has its own port. The portal suggests
-the right value when you deploy the identity, so take the one it offers.
+A bring-your-own-bot identity answers Microsoft Teams chat on that Azure Bot messaging URL, not
+through `ChatChannel`. Calls still use the calling row. Take the URL the portal offers when you
+deploy the identity.
 
 <Card title="Expose your agent" icon="globe" href="/expose">
   The mount commands that publish the call path, what a healthy probe looks like, and the

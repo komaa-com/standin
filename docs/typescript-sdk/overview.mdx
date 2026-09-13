@@ -5,10 +5,9 @@ keywords: ["StandIn TypeScript SDK", "Microsoft Teams voice agent", "Node.js voi
 icon: "js"
 ---
 
-`@komaa/standin-sdk` is one end of a socket. StandIn, the hosted service, joins the Microsoft Teams
-call and owns the Microsoft side entirely: the bot registration, Graph, media negotiation, the avatar
-tile. It then dials your worker, once per call, over an authenticated WebSocket. This package answers
-that dial, speaks the call protocol, and hands each call to your code.
+`@komaa/standin-sdk` is one end of a socket. StandIn handles the Microsoft Teams side and dials your
+worker, once per call, over an authenticated WebSocket. This package answers that dial, speaks the
+call protocol, and hands each call to your code.
 
 ```bash
 npm install @komaa/standin-sdk
@@ -213,8 +212,7 @@ that decides what to say belong to your provider. The SDK carries PCM in both di
 you the turn-taking pieces if you are assembling three vendors yourself, but nothing in this package
 transcribes, synthesizes or thinks.
 
-**The Microsoft side is StandIn's.** Bot registration, Graph, the media negotiation and the call
-itself. Your worker never holds a Bot Framework credential and never talks to Microsoft.
+**The Microsoft side is StandIn's.** StandIn handles it. Your worker never holds a Bot Framework credential and never talks to Microsoft.
 
 **StandIn draws the avatar tile; the SDK sends it hints.** This is the boundary that is most often
 described wrongly, so it is worth stating exactly. The SDK does carry the vision and avatar lane:

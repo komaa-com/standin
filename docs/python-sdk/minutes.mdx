@@ -157,6 +157,20 @@ The instruction not to infer what was on screen is the load-bearing one. A model
 
 Answer the model the moment it calls, then run the recap. A tool call with no result stalls the turn, and the recap is a full model run plus a document write plus a send, so the caller sits in silence wondering whether anything is happening.
 
+## From the OpenClaw and Hermes plugins
+
+You do not have to wire `post_minutes` yourself. Each plugin has a switch (`meeting_recap` / `meetingRecap`), off by default.
+
+When it is on, hang-up writes a **restart-recoverable local spool** first (`STANDIN_RECAP_DIR`, else `STANDIN_STATE_DIR/recap`, else `~/.standin/state/recap`) and posts after the call is already gone. A process restart drains unfinished jobs if that directory survives the process. Treat recap as best-effort unless that directory is on storage that survives a process or container restart: the default path is local process disk, which is ephemeral in most containers. The file stays until the minutes post, the job expires (24 hours), or it hits the retry limit (8).
+
+OpenClaw always opens its own **listen-only** chat lane for recap and never answers on it. Hermes reuses the host `respond` handler when one exists, and opens a listen-only lane only when it does not.
+
+The host must provide an outbound chat lane and a summarization consult. Hang-up does not await the consult. Meeting recaps are best-effort. They may be lost if the worker exits during processing.
+
+Delivery needs StandIn's outbound chat socket, which is the [StandIn Managed Bot](/tiers#the-standin-managed-bot). The [sandbox](/tiers#the-sandbox) has no chat. A Free / bring-your-own-bot identity answers chat on its own Azure Bot messaging URL, not this socket.
+
+Plugin pages: [Hermes Agent](/python-sdk/plugins/hermes-agent#meeting-recap). The TypeScript twin is [OpenClaw](/typescript-sdk/plugins/openclaw#meeting-recap).
+
 ## Next
 
 <CardGroup cols={2}>

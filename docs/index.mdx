@@ -61,8 +61,8 @@ flowchart LR
 
 Two halves, and you run only one of them.
 
-**StandIn is the bridge.** It joins the Microsoft Teams call, handles the media, and dials your worker over
-one authenticated WebSocket per call. There is no media infrastructure for you to stand up.
+**StandIn handles the Microsoft Teams connection.** It dials your worker over one authenticated
+WebSocket per call.
 
 **Your worker is the brain.** The SDK authenticates that connection and owns the wire protocol,
 audio timing, sequence numbers, capacity, draining and shutdown. Your handler or framework plugin

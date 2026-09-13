@@ -17,8 +17,6 @@ code it documents. Built with [Mintlify](https://mintlify.com).
 | `teams/` | The Microsoft side: connection modes, Azure bot, app package, publishing. |
 | `expose.mdx`, `troubleshooting.mdx`, `community.mdx` | Reachability, failures, the sandbox tier. |
 | `python-sdk/`, `typescript-sdk/` | The two SDK products, mirrored page for page. |
-| `legacy/` | The earlier standalone bridges. Still published, still accurate, not extended. |
-| `legacy/_hidden/` | Bridges that were never launched. Out of navigation and in `.mintignore`, which is what keeps them off the site. |
 | `logo/`, `favicon.svg`, `images/`, `assets/` | Brand and screenshots. |
 
 ## Local preview

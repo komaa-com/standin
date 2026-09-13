@@ -5,7 +5,7 @@ keywords: ["standin python sdk", "microsoft teams ai agent", "python voice agent
 icon: "python"
 ---
 
-`standin-sdk` is the worker side of a StandIn call. StandIn is the hosted bridge that joins the Microsoft Teams call: it owns the Microsoft side entirely, the bot registration, Graph, media negotiation and the avatar tile, and it talks to your worker over one authenticated WebSocket per call. This package is that socket's other end.
+`standin-sdk` is the worker side of a StandIn call. StandIn handles the Microsoft Teams side and talks to your worker over one authenticated WebSocket per call. This package is that socket's other end.
 
 You write a handler. The SDK does everything else on the wire.
 
@@ -172,8 +172,7 @@ that decides what to say belong to your provider. The SDK carries PCM in both di
 the turn-taking pieces if you are assembling three vendors yourself, but nothing in this package
 transcribes, synthesizes or thinks.
 
-**The Microsoft side is StandIn's.** Bot registration, Graph, the media negotiation and the call
-itself. Your worker never holds a Bot Framework credential and never talks to Microsoft.
+**The Microsoft side is StandIn's.** StandIn handles it. Your worker never holds a Bot Framework credential and never talks to Microsoft.
 
 **StandIn draws the avatar tile; the SDK sends it hints.** This is the boundary most often described
 wrongly, so it is worth stating exactly. The SDK does carry the vision and avatar lane:

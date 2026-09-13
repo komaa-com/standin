@@ -7,6 +7,10 @@ icon: "sliders"
 
 The SDK is configured from the environment, and nothing here is read at import: a variable is read when the thing that needs it is built or called, so a worker that never opens a lane never needs that lane's settings. An explicit argument always wins over the environment, which is the rule to reach for whenever the value already lives somewhere better, such as a secret store your host resolved for you.
 
+<Warning>
+**Python and TypeScript do not treat a blank `STANDIN_CHAT_SECRET` or a bad `STANDIN_PORT` the same way.** Unset `STANDIN_CHAT_SECRET` rather than exporting it empty, and never ship a non-numeric `STANDIN_PORT`. Details are under [Three things that cost an afternoon](#three-things-that-cost-an-afternoon). The TypeScript twin is [Configuration](/typescript-sdk/configuration).
+</Warning>
+
 ## Everything the SDK reads
 
 Every `STANDIN_` variable, in one place, because configuring a deployment out of nine pages is how a deployment ends up half configured.
@@ -20,7 +24,8 @@ Every `STANDIN_` variable, in one place, because configuring a deployment out of
 | `STANDIN_CHAT_SECRET` | The key the chat lane signs with, read before `STANDIN_SECRET` and falling back to it. A managed deployment issues a separate key for chat; with one key for both lanes, leave this unset. | [Chat](/python-sdk/chat) |
 | `STANDIN_CHAT_URL` | The chat channel `ChatChannel` dials. It also derives the single origin chat attachments may be fetched from, so there is no second setting to get wrong. | [Chat](/python-sdk/chat) |
 | `STANDIN_WORKER_URL` | The StandIn control address an outbound call is posted to. StandIn gives it to you with your connection secret. A value that is not http or https, has no host, or carries credentials is refused when `OutboundCaller` is built, not when somebody tries to ring. | [Reaching people](/python-sdk/reaching-people) |
-| `STANDIN_STATE_DIR` | Where a parked outbound message lives until the person answers. Default `~/.standin/state`, created owner-only. Deliberately not a temp directory. | [Reaching people](/python-sdk/reaching-people) |
+| `STANDIN_STATE_DIR` | Where a parked outbound message lives until the person answers, and the default parent of unfinished meeting recaps. Default `~/.standin/state`, created owner-only. Deliberately not a temp directory. | [Reaching people](/python-sdk/reaching-people), [Meeting recap](/python-sdk/minutes#from-the-openclaw-and-hermes-plugins) |
+| `STANDIN_RECAP_DIR` | Where unfinished meeting recaps sit until they post, expire (24 hours), or hit the retry limit (8). Restart-recoverable local spool. Default `$STANDIN_STATE_DIR/recap`. Best-effort unless this directory is on storage that survives a process or container restart: the default is local process disk, which is ephemeral in most containers. | [Meeting recap](/python-sdk/minutes#from-the-openclaw-and-hermes-plugins) |
 | `STANDIN_OUTBOUND_ALLOW` | Comma-separated directory ids this agent may ring, read by `OutboundPolicy.from_env()`. Unset means outbound calling is off. | [Reaching people](/python-sdk/reaching-people) |
 | `STANDIN_OUTBOUND_MAX_PER_HOUR` | Calls placed in any rolling hour, across all targets. Default `6`. Zero means no cap, which is a choice rather than a default. | [Reaching people](/python-sdk/reaching-people) |
 | `STANDIN_TENANT_ID` | Which organisation a placed call belongs to. Operator configuration only: never the message, the metadata, the model or the caller. | [Reaching people](/python-sdk/reaching-people) |

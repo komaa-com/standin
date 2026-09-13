@@ -40,17 +40,14 @@ And placing an outbound call is your worker dialling **out** to the StandIn addr
 
 <Note>
 **The chat lane needs no mount.** `ChatChannel` dials **out** from your worker to StandIn, so there
-is no listener, no port and no tunnel rule for chat, and your agent holds no Bot Framework
-credential. If you are looking for a chat mount to create, you are looking for something that does
-not exist any more. See [Architecture](/concepts/architecture#two-lanes).
+is no inbound chat path, no port and no tunnel rule for chat. See
+[Architecture](/concepts/architecture#two-lanes).
 </Note>
 
 <Warning>
-**Bring-your-own-bot chat is a different thing again.** On a BYO-bot identity, Microsoft Teams chat is served
-by your runtime's own Microsoft Teams channel (OpenClaw's `msteams` channel, the Hermes gateway's Microsoft Teams
-platform) on `127.0.0.1:3978` at `/api/messages`, and that endpoint is not part of this SDK. If you
-run it, publish it the same way as the call path and register it on your connection. If you do not,
-skip it: calls work normally without it.
+**Bring-your-own Azure bot chat is not this SDK.** Microsoft delivers chat to the messaging URL on
+your Azure Bot. Publish that URL if you answer chat; skip it if you only take calls. The portal
+shows the value to register. Calls still use the calling row above.
 </Warning>
 
 ## Mount the call path
@@ -131,10 +128,9 @@ Paste a bare host and StandIn appends the default path. Paste a full URL and it 
 given. With a path mount there is no port in the value.
 
 <Note>
-**StandIn's own endpoints are a separate layer.** The `https://<identity>.standin.komaa.com/api/calling`
-address you point your **Azure Bot** at is hosted by StandIn and is unaffected by anything on this
-page. That one goes in the Azure portal ([Create the Azure bot](/teams/azure-bot)); the one above
-goes in the StandIn dashboard.
+The Azure Bot calling webhook (`https://<identity>.standin.komaa.com/api/calling`) is a StandIn
+URL you set in Azure. It is not the worker URL on this page. Set the webhook in
+[Create the Azure bot](/teams/azure-bot). Register the worker URL above in the StandIn dashboard.
 </Note>
 
 ## Probe it by hand
@@ -187,10 +183,3 @@ signal: the Python listener is refusing an unsigned request, and the TypeScript 
 that nothing but an upgrade belongs there. Use `/healthz` for liveness and the upgrade probe above
 for routing, and never write a check around the call path's status code.
 </Warning>
-
-## Legacy standalone bridges
-
-The older standalone bridges published a second inbound chat lane, so they needed a second mount.
-This SDK does not: its chat lane is dialled **out** by `ChatChannel`, so there is no listener, no
-port and no tunnel rule for chat. See the chat lane ([Python](/python-sdk/chat),
-[TypeScript](/typescript-sdk/chat)).

@@ -22,7 +22,7 @@ OpenClaw gateway process, declared by its `openclaw.plugin.json`, because it con
 realtime speech-to-speech session, its provider registry and its logger, all of which are in-process
 objects.
 
-OpenClaw's external HTTP surface is text-only, so a standalone worker could only use OpenClaw as a
+OpenClaw's external HTTP surface is text-only, so a worker that only called that HTTP surface could only use OpenClaw as a
 text brain and bring its own STT and TTS, which is exactly the part this plugin exists to avoid.
 
 The plugin registers one host-managed background service, so OpenClaw's own lifecycle starts the call
@@ -70,6 +70,8 @@ Merge this into `~/.openclaw/openclaw.json`, keeping the `plugins.load.paths` en
           "path": "/msteams/calling",
           "maxConcurrentCalls": 4,
           "requireRecordingStatus": false,
+          "sessionScope": "per-call",
+          "meetingRecap": false,
           "realtime": {
             "provider": "openai",
             "providers": {
@@ -111,6 +113,8 @@ Call your StandIn number.
 | `inboundPolicy` / `allowFrom` | Who may call. **Defaults to `disabled`, which refuses everyone.** |
 | `inboundGreeting` | Spoken on pickup. Omit it and the agent waits for the caller to speak first. |
 | `requireRecordingStatus` | Hold caller media until Microsoft Teams reports recording active. |
+| `sessionScope` | Memory of the agent session that writes the minutes: `per-call` (default), `per-thread`, or `per-aad`. The voice session is always per call. |
+| `meetingRecap` | After the call ends, post minutes into the Microsoft Teams chat. Off unless exactly `true`. Needs the StandIn chat lane ([Tiers](/tiers#the-standin-managed-bot)) and a summarization consult. Best-effort: hang-up does not await the post. |
 | `realtime.provider` / `realtime.providers` | Provider selection and its credentials. |
 | `realtime.instructions` | The system prompt for the call. |
 | `realtime.suppressInputDuringPlayback` | Echo guard on or off. On by default. |
@@ -127,10 +131,11 @@ it with a guessable value.
 **refuses**. Defaulting the other way would mean a config typo silently opens your agent to anyone who
 can reach the number.
 
-`allowFrom` takes the caller's **AAD object id**, not their email. It matches on exact id,
-case-insensitive, or on digits-only for a phone number. The id match is what lets a Microsoft Teams caller be
-allowlisted at all: their id is an AAD object id, and phone normalization would reduce it to the empty
-string and match nothing.
+`allowFrom` takes the caller's **AAD object id**, not their email. Copy it from
+`session.start.caller.aadId` on an inbound call (a refused call still logs it). Emails never match.
+It matches on exact id, case-insensitive, or on digits-only for a phone number. The id match is what
+lets a Microsoft Teams caller be allowlisted at all: their id is an AAD object id, and phone
+normalization would reduce it to the empty string and match nothing.
 
 An AAD object id is empty for guest and anonymous callers, so an anonymous caller can never be
 allowlisted. That is the intended behaviour.
@@ -230,13 +235,37 @@ What this plugin covers, stated once so you can design around it:
   realtime session this plugin drives. The prompt the caller talks to is `realtime.instructions`,
   which is this plugin's own configuration rather than the agent's.
 - **Chat and messages** belong to the SDK's own [chat lane](/typescript-sdk/chat), which is a
-  separate surface with its own page.
-- **Vision, avatar expression, visemes and meeting minutes** are on the StandIn call wire and in the
-  SDK core, and this plugin does not wire any of them into the OpenClaw realtime session. That is a
-  boundary of this plugin, not of the call. Reach for `VisionTools` and `CallTools` directly from a
-  handler of your own if you need them: see [Vision and the avatar](/typescript-sdk/vision),
-  [The avatar](/typescript-sdk/avatar) and [Meeting recap](/typescript-sdk/minutes).
+  separate surface with its own page. When `meetingRecap` is on, this plugin opens that lane
+  listen-only so it can post minutes without answering chat.
+- **Meeting recap** is this plugin's `meetingRecap` switch. Off by default. See
+  [Meeting recap](#meeting-recap) below, and the library it calls in
+  [Meeting recap](/typescript-sdk/minutes).
+- **Vision, avatar expression and visemes** are on the StandIn call wire and in the SDK core, and
+  this plugin does not wire them into the OpenClaw realtime session. That is a boundary of this
+  plugin, not of the call. Reach for `VisionTools` and `CallTools` from a handler of your own:
+  [Vision and the avatar](/typescript-sdk/vision) and [The avatar](/typescript-sdk/avatar).
 - **Providers** are the realtime speech-to-speech ones OpenClaw resolves, and the plugin consumes
   the host's own registry rather than carrying a second list. A provider that offers only speech to
   text and text to speech is not one this plugin can drive: the whole design rests on the model
   hearing the caller directly, which is where the latency goes.
+
+## Meeting recap
+
+Off until you set `meetingRecap: true`. The plugin then:
+
+1. Collects the call transcript.
+2. Writes a restart-recoverable local spool before hang-up returns (`STANDIN_RECAP_DIR`, else `STANDIN_STATE_DIR/recap`, else `~/.standin/state/recap`). A process restart drains what was left if that directory survives the process. Treat recap as best-effort unless that directory is on storage that survives a process or container restart. The file stays until posted, expired (24 hours), or the retry limit (8).
+3. Opens its own **listen-only** [chat lane](/typescript-sdk/chat) and posts minutes on it. That lane never answers chat, even if something else on the host already does.
+
+The host must provide an outbound chat lane and a summarization consult. Hang-up does not wait for the consult. A recap that cannot open the chat lane is logged and not posted. Meeting recaps are best-effort. They may be lost if the worker exits during processing.
+
+<Warning>
+Delivery uses StandIn's outbound chat socket. That socket exists on the **StandIn Managed Bot**
+([Tiers](/tiers)). The sandbox has no chat lane. A bring-your-own-bot identity answers chat through
+its Azure Bot messaging URL, not this socket, so this switch will not post there. Put
+`STANDIN_RECAP_DIR` on persistent storage when recap reliability matters. A directory that dies with
+the process loses unfinished minutes.
+</Warning>
+
+`sessionScope` keys the **consult that writes the minutes**, not the voice session. Voice is always
+one session per call.

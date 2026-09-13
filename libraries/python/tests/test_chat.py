@@ -282,6 +282,28 @@ async def test_a_redelivery_does_not_make_an_old_message_look_new(monkeypatch):
     assert found.at_ms == _NOW
 
 
+async def test_a_listen_only_lane_remembers_and_says_nothing(monkeypatch):
+    """A lane that exists only to post minutes must still learn where people
+    chat, and must not answer them, not even with a typing indicator."""
+    monkeypatch.setattr(chat_module, "_clock", lambda: _NOW)
+    chats = PersonalChats()
+    turns: list[str] = []
+
+    async def respond(message: InboundMessage) -> str:
+        turns.append(message.activity_id)
+        return "ok"
+
+    channel = ChatChannel(respond=respond, secret="k", chats=chats, listen_only=True)
+    channel._ws = _FakeSocket([_inbound_body()])
+    await channel._run()
+    await _drain(channel)
+
+    assert turns == []
+    assert channel._ws.sent == []
+    found = chats.for_caller(caller_aad_id="caller-1", tenant_id="tenant-1", now_ms=_NOW)
+    assert found is not None
+
+
 async def test_a_channel_with_no_memory_still_answers(monkeypatch):
     """The memory is opt-in: a worker that never places calls has no use for
     it."""

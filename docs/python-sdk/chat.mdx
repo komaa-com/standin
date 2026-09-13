@@ -17,7 +17,13 @@ flowchart TD
   G --> T2["StandIn sends it to Microsoft Teams"]
 ```
 
-Managed connections only, and that needs no flag: the socket authenticates with your connection secret, so if it opens at all you are managed.
+Managed connections only, and that needs no flag: the socket authenticates with your connection secret, so if it opens at all you are managed. The [sandbox](/tiers#the-sandbox) has no chat lane. A meeting recap that only posts uses `listen_only=True` so it never answers.
+
+## Meeting recap
+
+`listen_only=True` is how a recap lane posts without answering. The host must supply that outbound chat lane (`ChatChannel.start()`) and a summarization callback (`post_minutes` or the plugin consult). Hang-up does not await the post.
+
+Meeting recaps are best-effort. They may be lost if the worker exits during processing.
 
 ## Minimal use
 
@@ -48,7 +54,7 @@ asyncio.run(main())
 ## Constructor
 
 ```python
-ChatChannel(*, respond, secret=None, url=None, chats=None)
+ChatChannel(*, respond, secret=None, url=None, chats=None, listen_only=False)
 ```
 
 | Argument | Default | Meaning |
@@ -57,6 +63,7 @@ ChatChannel(*, respond, secret=None, url=None, chats=None)
 | `secret` | `STANDIN_CHAT_SECRET`, else `STANDIN_SECRET` | The key this lane signs with. No secret at all raises `StandInError` naming both variables. |
 | `url` | `STANDIN_CHAT_URL`, else `wss://teams.standin.komaa.com/api/chat/channel` | The chat channel to dial. |
 | `chats` | `None` | A [`PersonalChats`](#remembering-who-messaged-you) to feed. Every personal message that arrives is remembered in it, which is what later lets a call post back to the caller who sent one. |
+| `listen_only` | `False` | Take messages without answering them. `chats` is still fed, `respond` is never called, and nothing is sent back, not even the typing indicator. For a lane that only posts, such as a meeting recap, when something else already answers this connection's chat. |
 
 `await chat.start()` dials StandIn and begins taking messages. `await chat.aclose()` cancels the in-flight turns and closes the socket.
 
