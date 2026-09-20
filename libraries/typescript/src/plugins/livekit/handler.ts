@@ -18,7 +18,13 @@
  * handler yourself.
  */
 
-import { GroupGate, isAddressed, type GateDecision } from "../../gate.js";
+import {
+  GroupGate,
+  isAddressed,
+  isDismissal,
+  isVerbalInterrupt,
+  type GateDecision,
+} from "../../gate.js";
 import type { CallHandler, CallSession } from "../../handler.js";
 import { logger } from "../../log.js";
 import { StartupBuffer } from "../../startup.js";
@@ -198,6 +204,19 @@ export class LiveKitHandler implements CallHandler {
       // it: the window is a timestamp, so a missed phrase self-heals by clock
       // rather than stranding the agent silent for the meeting.
       if (isAddressed(text, gate.wakePhrases)) gate.decide(text, Date.now());
+      return;
+    }
+    const wake = [...gate.wakePhrases];
+    // Only while the gate is muting anything. On a 1:1 call, or with no wake
+    // phrase configured, nothing changes: every turn is answered as before.
+    if (gate.active && isVerbalInterrupt(text, wake)) {
+      // "<name>, be quiet" carries the name, so read as a turn it is an
+      // address: the gate opens and the agent answers the one sentence that
+      // asked it not to. An interrupt is never a turn to answer, and a request
+      // for silence also ends the follow-up window it was said inside. "wait"
+      // does not: whoever said it is about to ask something.
+      if (isDismissal(text, wake)) gate.closeWindow();
+      this.#lastDecision = { respond: false, addressed: false };
       return;
     }
     this.#lastDecision = gate.decide(text, Date.now());

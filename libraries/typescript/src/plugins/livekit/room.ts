@@ -108,6 +108,14 @@ export async function readTranscript(
     localIdentity: route.localIdentity,
     agentIdentity: route.agentIdentity(),
   });
+  // A publisher that marks its streams says which one closes the turn. Some
+  // publish every INTERIM transcript as a complete stream of its own, and read
+  // as finished turns those were harmless only while the real final overwrote
+  // them: an interim "wait" must never be able to decide a turn. A publisher
+  // that marks nothing keeps the old reading, where the end of a stream is
+  // the end of the turn.
+  const marked = reader.info?.attributes?.[ATTRIBUTE_TRANSCRIPTION_FINAL];
+  const closesTurn = marked === undefined ? true : marked === "true";
   let latest = "";
   try {
     for await (const chunk of reader) {
@@ -121,7 +129,7 @@ export async function readTranscript(
     return;
   }
   if (mine && latest !== "" && !route.isClosed())
-    await route.deliver(latest, true);
+    await route.deliver(latest, closesTurn);
 }
 
 /**

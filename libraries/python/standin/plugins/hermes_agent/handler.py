@@ -49,7 +49,7 @@ from standin.audio import pcm16_rms
 from standin.avatar import ExpressionCue
 from standin.delivery import LiveCalls
 from standin.echo_guard import EchoGuard
-from standin.gate import GroupGate, is_verbal_interrupt
+from standin.gate import GroupGate, is_dismissal, is_verbal_interrupt
 from standin.lipsync import TurnLipSync
 from standin.minutes import Transcript
 
@@ -563,7 +563,12 @@ class RealtimeHandler:
 
         if is_verbal_interrupt(text, self._plugin.wake_phrases):
             # Suppress any reply to the interruption itself: "stop" does not
-            # want an answer, it wants silence.
+            # want an answer, it wants silence. A request for silence also ends
+            # the follow-up window it was said inside, or the next sentence in
+            # the room is answered by an assistant that was just told to be
+            # quiet. "wait" does not: whoever said it is about to ask something.
+            if self._gate is not None and is_dismissal(text, self._plugin.wake_phrases):
+                self._gate.close_window()
             self._drop_response = True
             await self._cut_playback()
             return

@@ -142,6 +142,7 @@ export {
   type GateDecision,
   type GroupGateOptions,
   isAddressed,
+  isDismissal,
   isMeetingThread,
   isVerbalInterrupt,
 } from "./gate.js";

@@ -244,6 +244,20 @@ export class GroupGate {
     this.#humanCount = Math.max(this.#humanCount, count);
   }
 
+  /**
+   * Give the floor back: the next turn has to name the assistant again.
+   *
+   * Call this when somebody asks the assistant for silence (see `isDismissal`).
+   * Without it "be quiet" only cuts the sentence in progress, the follow-up
+   * window it was said inside stays open, and the assistant answers the very
+   * next thing anybody says. Not for every interrupt: somebody who says "wait"
+   * is about to ask something, and still wants the answer. Harmless on a 1:1
+   * call, where there is no window to close.
+   */
+  closeWindow(): void {
+    this.#lastAddressedMs = undefined;
+  }
+
   /** Answer this turn, or stay out of the meeting? */
   decide(transcript: string, nowMs: number): GateDecision {
     const addressed = isAddressed(transcript, this.wakePhrases);
@@ -262,27 +276,20 @@ export class GroupGate {
   }
 }
 
-export function isVerbalInterrupt(
-  text: string | undefined,
-  wakePhrases?: string[],
-): boolean {
+/** The utterance with filler and wake phrases peeled off both ends. */
+function coreOf(text: string | undefined, wakePhrases?: string[]): string[] {
   let core = normalizeWords(text);
   const wake = (wakePhrases ?? [])
     .map(normalizeWords)
     .filter((seq) => seq.length > 0);
-  // Strip surrounding filler and wake tokens until stable - they interleave
-  // ("ok <name> please stop").
+  // Strip surrounding wake and filler tokens until stable - they interleave
+  // ("ok <name> please stop"). The wake phrase is tried BEFORE filler at each
+  // end: a wake phrase may itself begin with a filler word ("hey assistant"),
+  // and peeling "hey" first leaves "assistant", which no longer matches the
+  // phrase it was part of.
   let changed = true;
   while (changed && core.length > 0) {
     changed = false;
-    while (core.length > 0 && FILLER_TOKENS.has(core[0] ?? "")) {
-      core.shift();
-      changed = true;
-    }
-    while (core.length > 0 && FILLER_TOKENS.has(core[core.length - 1] ?? "")) {
-      core.pop();
-      changed = true;
-    }
     for (const seq of wake) {
       if (startsWithSeq(core, seq)) {
         core = core.slice(seq.length);
@@ -292,10 +299,67 @@ export function isVerbalInterrupt(
         changed = true;
       }
     }
+    if (changed) continue;
+    if (core.length > 0 && FILLER_TOKENS.has(core[0] ?? "")) {
+      core.shift();
+      changed = true;
+    } else if (
+      core.length > 0 &&
+      FILLER_TOKENS.has(core[core.length - 1] ?? "")
+    ) {
+      core.pop();
+      changed = true;
+    }
   }
+  return core;
+}
+
+export function isVerbalInterrupt(
+  text: string | undefined,
+  wakePhrases?: string[],
+): boolean {
+  const core = coreOf(text, wakePhrases);
   // The wake word alone ("<name>?") is an address, not an interrupt.
   if (core.length === 0 || core.length > 4) {
     return false;
   }
   return INTERRUPT_PHRASES.has(core.join(" "));
+}
+
+/**
+ * The interrupts that ask for SILENCE rather than a pause. "wait" and "hold on"
+ * come from somebody who is about to say more, and they still want the answer;
+ * "be quiet" does not. Always a subset of the interrupt phrases.
+ */
+const DISMISSAL_PHRASES = new Set([
+  "stop talking",
+  "be quiet",
+  "quiet",
+  "shut up",
+  "enough",
+  "thats enough",
+  "اسكت",
+  "اصمت",
+  "خلاص",
+  "كفى",
+  "كفاية",
+  "كفايه",
+  "بس",
+]);
+
+/**
+ * Is this whole utterance a request for silence, not just a pause?
+ *
+ * Every dismissal is a verbal interrupt; not every interrupt is a dismissal.
+ * Use it to decide whether to call `GroupGate.closeWindow()`: after "be quiet"
+ * the assistant should wait to be named again, and after "wait" it should still
+ * answer the question that follows.
+ */
+export function isDismissal(
+  text: string | undefined,
+  wakePhrases?: string[],
+): boolean {
+  const core = coreOf(text, wakePhrases);
+  if (core.length === 0 || core.length > 4) return false;
+  return DISMISSAL_PHRASES.has(core.join(" "));
 }
