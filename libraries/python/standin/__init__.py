@@ -139,6 +139,7 @@ from .gate import (
     GateDecision,
     GroupGate,
     is_addressed,
+    is_dismissal,
     is_meeting_thread,
     is_verbal_interrupt,
 )
@@ -423,6 +424,7 @@ __all__ = [
     "frame_owner",
     "frame_duration_ms",
     "is_addressed",
+    "is_dismissal",
     "load_media",
     "media_roots",
     "is_meeting_thread",

@@ -1230,6 +1230,47 @@ describe("the LiveKit relay", () => {
     expect(handler.lastDecision).toEqual({ respond: true, addressed: true });
   });
 
+  it("does not read being told to be quiet as being addressed", async () => {
+    // "assistant, be quiet" carries the name. Read as a turn it opens the gate,
+    // and the agent answers the one sentence that asked it not to.
+    const { handler, handlers } = await startLiveKit(undefined, {
+      wakePhrases: ["assistant"],
+    });
+    await handlers.onCallerTranscript?.("assistant, summarise that", true);
+    expect(handler.lastDecision?.respond).toBe(true);
+
+    await handlers.onCallerTranscript?.("assistant, be quiet", true);
+    expect(handler.lastDecision).toEqual({ respond: false, addressed: false });
+
+    // And it ended the follow-up window it was said inside.
+    await handlers.onCallerTranscript?.("right, where were we", true);
+    expect(handler.lastDecision?.respond).toBe(false);
+
+    await handlers.onCallerTranscript?.("assistant, carry on", true);
+    expect(handler.lastDecision?.respond).toBe(true);
+  });
+
+  it("keeps the follow-up window open after a pause", async () => {
+    // "wait" is not a turn to answer, but whoever said it is about to ask
+    // something: the question that follows still gets its answer.
+    const { handler, handlers } = await startLiveKit(undefined, {
+      wakePhrases: ["assistant"],
+    });
+    await handlers.onCallerTranscript?.("assistant, summarise that", true);
+    await handlers.onCallerTranscript?.("wait", true);
+    expect(handler.lastDecision?.respond).toBe(false);
+    await handlers.onCallerTranscript?.("what was the second number?", true);
+    expect(handler.lastDecision?.respond).toBe(true);
+  });
+
+  it("changes nothing on a call the gate is not muting", async () => {
+    // No wake phrase configured, so the gate mutes nothing and every turn is
+    // answered exactly as before, interrupt words included.
+    const { handler, handlers } = await startLiveKit();
+    await handlers.onCallerTranscript?.("hold on", true);
+    expect(handler.lastDecision?.respond).toBe(true);
+  });
+
   it("lets a partial notice a wake phrase but never decide a turn", async () => {
     // Deciding on a partial returns "do not respond" for a turn that is about
     // to address the assistant, and the answer to a turn that DID address it

@@ -576,6 +576,66 @@ def test_a_count_of_one_cannot_disarm_a_meeting_thread() -> None:
     assert g.is_group is True
 
 
+def test_being_told_to_stop_gives_the_floor_back() -> None:
+    """A request for silence used to cut one sentence and leave the follow-up
+    window open, so the assistant answered the next thing anybody said."""
+    g = gate.GroupGate(
+        wake_phrases=("assistant",), thread_id="19:m@thread.v2", follow_up_window_ms=10_000
+    )
+    assert g.decide("assistant, summarise that", 1_000.0).respond is True
+    g.close_window()
+    assert g.decide("right, where were we", 2_000.0).respond is False
+    # Naming it again is all it takes to bring it back.
+    assert g.decide("assistant, carry on", 3_000.0).respond is True
+
+
+def test_closing_the_window_on_a_one_to_one_call_changes_nothing() -> None:
+    g = gate.GroupGate(wake_phrases=("assistant",), thread_id="")
+    g.close_window()
+    assert g.decide("hello", 0.0).respond is True
+
+
+def test_a_wake_phrase_that_starts_with_a_filler_word_is_still_peeled() -> None:
+    """ "hey" is filler. Peeled first, it left "assistant", which no longer matched
+    the wake phrase it was part of, so "hey assistant, be quiet" was read as an
+    address and answered."""
+    for wake in (("hey assistant",), ("ok assistant",)):
+        said = f"{wake[0]}, be quiet"
+        assert gate.is_verbal_interrupt(said, wake) is True, said
+        assert gate.is_dismissal(said, wake) is True, said
+    assert gate.is_verbal_interrupt("hey assistant, what is the plan", ("hey assistant",)) is False
+
+
+@pytest.mark.parametrize(
+    ("said", "dismissal"),
+    [
+        ("be quiet", True),
+        ("assistant, shut up", True),
+        ("enough", True),
+        ("اسكت", True),
+        ("tais toi", True),
+        ("sei still", True),
+        ("wait", False),
+        ("hold on", False),
+        ("stop", False),
+        ("never mind", False),
+        ("be quiet about the budget", False),
+    ],
+)
+def test_a_request_for_silence_is_told_apart_from_a_pause(said: str, dismissal: bool) -> None:
+    """ "wait" comes from somebody who is about to ask something and still wants
+    the answer. "be quiet" does not."""
+    assert gate.is_dismissal(said, ("assistant",)) is dismissal
+    if dismissal:
+        assert gate.is_verbal_interrupt(said, ("assistant",)) is True, (
+            "every dismissal is an interrupt"
+        )
+
+
+def test_every_dismissal_phrase_is_an_interrupt_phrase() -> None:
+    assert gate._DISMISSAL_PHRASES <= gate._INTERRUPT_PHRASES
+
+
 def test_the_follow_up_window_keeps_the_floor() -> None:
     g = gate.GroupGate(
         wake_phrases=("assistant",), thread_id="19:m@thread.v2", follow_up_window_ms=10_000
@@ -893,6 +953,35 @@ async def test_a_verbal_interrupt_cuts_playback_and_suppresses_the_reply() -> No
     assert h._drop_response is True
     assert session.events == ["cancel_playback"]
     assert rt.names() == ["cancel_response"]
+
+
+async def test_being_told_to_be_quiet_in_a_meeting_ends_the_follow_up_window() -> None:
+    """The interrupt cut one sentence and left the window open, so the assistant
+    answered the next thing anybody in the room said."""
+    session = FakeSession(_start(thread_id="19:meeting_abc@thread.v2"))
+    h, rt = await _started(session, wake_phrases=("hermes",))
+    await h._on_input_transcript("hermes, what is the plan?")
+    assert h._drop_response is False
+
+    await h._on_input_transcript("hermes, be quiet")
+    assert h._drop_response is True
+
+    before = list(rt.names())
+    await h._on_input_transcript("right, where were we")
+    assert h._drop_response is True, "answered a room that had just told it to be quiet"
+    assert "create_response" not in rt.names()[len(before) :]
+
+
+async def test_a_pause_in_a_meeting_keeps_the_follow_up_window() -> None:
+    """ "wait" is not answered, but whoever said it is about to ask something: the
+    question that follows is still inside the window and still gets its answer."""
+    session = FakeSession(_start(thread_id="19:meeting_abc@thread.v2"))
+    h, rt = await _started(session, wake_phrases=("hermes",))
+    await h._on_input_transcript("hermes, what is the plan?")
+    await h._on_input_transcript("wait")
+    assert h._drop_response is True
+    await h._on_input_transcript("what was the second step again?")
+    assert h._drop_response is False, "a follow-up inside the window went unanswered after a pause"
 
 
 # ------------------------------------------------------------------- tools

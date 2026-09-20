@@ -9,6 +9,22 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## 0.1.2 - 2026-09-20
+
+### Added
+
+- `close_window()` / `closeWindow()` on `GroupGate`, so an assistant that was
+  asked for silence waits to be named again.
+- `is_dismissal()` / `isDismissal()`, which tells "be quiet" apart from "wait".
+
+### Changed
+
+- In a meeting, the Hermes plugin and the TypeScript LiveKit plugin stay quiet
+  after "be quiet" until someone says the wake phrase. A pause such as "wait"
+  still gets the question that follows answered.
+- A wake phrase that begins with a filler word, such as "hey assistant", is now
+  recognised in front of an interrupt.
+
 ## 0.1.1 - 2026-09-13
 
 ### Added

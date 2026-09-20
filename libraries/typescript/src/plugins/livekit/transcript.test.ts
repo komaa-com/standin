@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ATTRIBUTE_TRANSCRIBED_TRACK_ID,
+  ATTRIBUTE_TRANSCRIPTION_FINAL,
   LOCAL_IDENTITY,
   isCallerTranscript,
   readTranscript,
@@ -134,6 +135,35 @@ describe("reading a transcript stream", () => {
       ["assistant, what is the plan", false],
       ["assistant, what is the plan", true],
     ]);
+  });
+
+  it("does not read an interim stream as a finished turn", async () => {
+    // Some publishers send every INTERIM transcript as a complete stream of
+    // its own, marked not final. Read as a finished turn, an interim "wait"
+    // could decide the turn before the real sentence arrived.
+    const seen: Array<[string, boolean]> = [];
+    const deliver = (text: string, final: boolean) =>
+      void seen.push([text, final]);
+    await readTranscript(
+      reader(["wait"], {
+        [ATTRIBUTE_TRANSCRIBED_TRACK_ID]: "TR_caller",
+        [ATTRIBUTE_TRANSCRIPTION_FINAL]: "false",
+      }),
+      "caller",
+      { ...route, deliver },
+    );
+    expect(seen.every(([, final]) => !final)).toBe(true);
+
+    seen.length = 0;
+    await readTranscript(
+      reader(["wait, what was the second number?"], {
+        [ATTRIBUTE_TRANSCRIBED_TRACK_ID]: "TR_caller",
+        [ATTRIBUTE_TRANSCRIPTION_FINAL]: "true",
+      }),
+      "caller",
+      { ...route, deliver },
+    );
+    expect(seen.at(-1)).toEqual(["wait, what was the second number?", true]);
   });
 
   it("reports nothing for the agent's own speech", async () => {

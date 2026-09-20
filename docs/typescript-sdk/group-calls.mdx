@@ -201,6 +201,25 @@ async onCallerTurn(text: string) {
 
 Suppress the reply to the interruption itself too. "stop" does not want an answer, it wants silence, and an agent that says "of course, I will stop" has not stopped.
 
+### A request for silence gives the floor back
+
+An interrupt cuts the sentence in progress. It does not close the follow-up window, so in a meeting the assistant would still answer the next thing anybody says. That is right after "wait", because whoever said it is about to ask something. It is wrong after "be quiet".
+
+`isDismissal(text, wakePhrases)` tells the two apart, and `gate.closeWindow()` makes the next turn name the assistant again:
+
+```ts
+if (isVerbalInterrupt(text, [...this.#wakePhrases])) {
+  if (isDismissal(text, [...this.#wakePhrases])) {
+    this.#gate?.closeWindow(); // "be quiet": wait to be named again
+  }
+  await this.#call?.cancelPlayback();
+  this.#provider.cancelResponse();
+  return;
+}
+```
+
+Every dismissal is an interrupt, so check it inside the interrupt branch. On a 1:1 call there is no window to close and the call does nothing.
+
 ## Where to call it
 
 On a finished transcript, once, before you spend a model call.
@@ -211,6 +230,7 @@ async onCallerTurn(text: string) {
   // Interrupts first: "stop" is not a turn to answer, and scoring it for
   // wake phrases can only end in answering it.
   if (isVerbalInterrupt(text, [...this.#wakePhrases])) {
+    if (isDismissal(text, [...this.#wakePhrases])) this.#gate?.closeWindow();
     await this.#call?.cancelPlayback();
     this.#provider.cancelResponse();
     return;

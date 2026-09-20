@@ -190,6 +190,23 @@ async def on_caller_turn(self, text: str) -> None:
 
 Suppress the reply to the interruption itself too. "stop" does not want an answer, it wants silence, and an agent that says "of course, I will stop" has not stopped.
 
+### A request for silence gives the floor back
+
+An interrupt cuts the sentence in progress. It does not close the follow-up window, so in a meeting the assistant would still answer the next thing anybody says. That is right after "wait", because whoever said it is about to ask something. It is wrong after "be quiet".
+
+`is_dismissal(text, wake_phrases)` tells the two apart, and `gate.close_window()` makes the next turn name the assistant again:
+
+```python
+if is_verbal_interrupt(text, self._wake_phrases):
+    if is_dismissal(text, self._wake_phrases):
+        self._gate.close_window()  # "be quiet": wait to be named again
+    await self._call.cancel_playback()
+    await self._client.cancel_response()
+    return
+```
+
+Every dismissal is an interrupt, so check it inside the interrupt branch. On a 1:1 call there is no window to close and the call does nothing.
+
 ## Where to call it
 
 On a finished transcript, once, before you spend a model call.
@@ -197,7 +214,7 @@ On a finished transcript, once, before you spend a model call.
 ```python
 import time
 
-from standin import is_verbal_interrupt
+from standin import is_dismissal, is_verbal_interrupt
 
 
 async def on_caller_turn(self, text: str) -> None:
@@ -205,6 +222,8 @@ async def on_caller_turn(self, text: str) -> None:
     # Interrupts first: "stop" is not a turn to answer, and scoring it for
     # wake phrases can only end in answering it.
     if is_verbal_interrupt(text, self._wake_phrases):
+        if is_dismissal(text, self._wake_phrases):
+            self._gate.close_window()
         await self._call.cancel_playback()
         await self._client.cancel_response()
         return

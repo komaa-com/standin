@@ -34,6 +34,7 @@ __all__ = [
     "GateDecision",
     "GroupGate",
     "is_addressed",
+    "is_dismissal",
     "is_meeting_thread",
     "is_verbal_interrupt",
 ]
@@ -135,6 +136,18 @@ class GroupGate:
         certainty and must not remove it.
         """
         self._human_count = max(self._human_count, count)
+
+    def close_window(self) -> None:
+        """Give the floor back: the next turn has to name the assistant again.
+
+        Call this when somebody asks the assistant for silence (see
+        :func:`is_dismissal`). Without it "be quiet" only cuts the sentence in
+        progress, the follow-up window it was said inside stays open, and the
+        assistant answers the very next thing anybody says. Not for every
+        interrupt: somebody who says "wait" is about to ask something, and still
+        wants the answer. Harmless on a 1:1 call, where there is no window to close.
+        """
+        self._last_addressed_ms = None
 
     def decide(self, transcript: str, now_ms: float) -> GateDecision:
         """Answer this turn, or stay out of the meeting?"""
@@ -268,27 +281,28 @@ def _strip_edges(tokens: list[str], wake_lists: list[list[str]]) -> list[str]:
     outside a filler word, and either order occurs.
     """
 
+    # The wake phrase is tried BEFORE filler at each end. A wake phrase may itself
+    # begin with a filler word ("hey assistant"), and peeling "hey" first leaves
+    # "assistant", which no longer matches the phrase it was part of.
     def peel_leading(toks: list[str]) -> bool:
-        changed = False
-        while toks and toks[0] in _FILLER:
-            toks.pop(0)
-            changed = True
         for wl in wake_lists:
             if wl and toks[: len(wl)] == wl:
                 del toks[: len(wl)]
                 return True
-        return changed
+        if toks and toks[0] in _FILLER:
+            toks.pop(0)
+            return True
+        return False
 
     def peel_trailing(toks: list[str]) -> bool:
-        changed = False
-        while toks and toks[-1] in _FILLER:
-            toks.pop()
-            changed = True
         for wl in wake_lists:
             if wl and len(toks) >= len(wl) and toks[len(toks) - len(wl) :] == wl:
                 del toks[len(toks) - len(wl) :]
                 return True
-        return changed
+        if toks and toks[-1] in _FILLER:
+            toks.pop()
+            return True
+        return False
 
     while tokens and peel_leading(tokens):
         pass
@@ -297,11 +311,51 @@ def _strip_edges(tokens: list[str], wake_lists: list[list[str]]) -> list[str]:
     return tokens
 
 
-def is_verbal_interrupt(transcript: str, wake_phrases: tuple[str, ...] = ()) -> bool:
-    """Is this whole utterance just a request to stop talking?"""
+def _core(transcript: str, wake_phrases: tuple[str, ...]) -> str:
+    """The utterance with filler and wake phrases peeled off both ends."""
     norm = _normalize(transcript)
     if not norm:
-        return False
+        return ""
     wake_lists = [_normalize(p).split(" ") for p in wake_phrases if _normalize(p)]
-    tokens = _strip_edges([t for t in norm.split(" ") if t], wake_lists)
-    return " ".join(tokens) in _INTERRUPT_PHRASES
+    return " ".join(_strip_edges([t for t in norm.split(" ") if t], wake_lists))
+
+
+def is_verbal_interrupt(transcript: str, wake_phrases: tuple[str, ...] = ()) -> bool:
+    """Is this whole utterance just a request to stop talking?"""
+    return _core(transcript, wake_phrases) in _INTERRUPT_PHRASES
+
+
+#: The interrupts that ask for SILENCE rather than a pause. "wait" and "hold on"
+#: come from somebody who is about to say more, and they still want the answer;
+#: "be quiet" does not. Always a subset of the interrupt phrases.
+_DISMISSAL_PHRASES: frozenset[str] = frozenset(
+    {
+        "quiet",
+        "be quiet",
+        "shut up",
+        "enough",
+        "اسكت",
+        "خلاص",
+        "كفى",
+        "كفاية",
+        "بس",
+        "ça suffit",
+        "tais toi",
+        "taisez vous",
+        "das reicht",
+        "es reicht",
+        "sei still",
+        "ruhe",
+    }
+)
+
+
+def is_dismissal(transcript: str, wake_phrases: tuple[str, ...] = ()) -> bool:
+    """Is this whole utterance a request for silence, not just a pause?
+
+    Every dismissal is a verbal interrupt; not every interrupt is a dismissal.
+    Use it to decide whether to call :meth:`GroupGate.close_window`: after "be
+    quiet" the assistant should wait to be named again, and after "wait" it
+    should still answer the question that follows.
+    """
+    return _core(transcript, wake_phrases) in _DISMISSAL_PHRASES

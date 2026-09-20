@@ -17,7 +17,9 @@ import {
   DEFAULT_FOLLOW_UP_WINDOW_MS,
   GroupGate,
   isAddressed,
+  isDismissal,
   isMeetingThread,
+  isVerbalInterrupt,
 } from "./gate.js";
 
 const MEETING = "19:meeting_abc@thread.v2";
@@ -106,6 +108,23 @@ describe("deciding a turn", () => {
     ).toBe(false);
   });
 
+  it("gives the floor back when it is told to stop", () => {
+    // A request for silence used to cut one sentence and leave the follow-up
+    // window open, so the agent answered the next thing anybody said.
+    const g = gate();
+    expect(g.decide("assistant, summarise that", 1000).respond).toBe(true);
+    g.closeWindow();
+    expect(g.decide("right, where were we", 2000).respond).toBe(false);
+    // Naming it again is all it takes to bring it back.
+    expect(g.decide("assistant, carry on", 3000).respond).toBe(true);
+  });
+
+  it("changes nothing on a one-to-one call when the window is closed", () => {
+    const g = gate({ threadId: "" });
+    g.closeWindow();
+    expect(g.decide("hello", 1000).respond).toBe(true);
+  });
+
   it("answers everything on a one-to-one call", () => {
     expect(gate({ threadId: "" }).decide("hello", 1000).respond).toBe(true);
   });
@@ -122,5 +141,35 @@ describe("deciding a turn", () => {
     const g = gate({ wakePhrases: [] });
     expect(g.active).toBe(false);
     expect(g.decide("hello", 1000).respond).toBe(true);
+  });
+});
+
+describe("being asked to stop", () => {
+  it("peels a wake phrase that starts with a filler word", () => {
+    // "hey" is filler. Peeled first, it left "assistant", which no longer
+    // matched the wake phrase it was part of, so "hey assistant, be quiet" was
+    // read as an address and answered.
+    for (const wake of ["hey assistant", "ok assistant"]) {
+      const said = `${wake}, be quiet`;
+      expect(isVerbalInterrupt(said, [wake])).toBe(true);
+      expect(isDismissal(said, [wake])).toBe(true);
+    }
+    expect(
+      isVerbalInterrupt("hey assistant, what is the plan", ["hey assistant"]),
+    ).toBe(false);
+  });
+
+  it("tells a request for silence apart from a pause", () => {
+    // "wait" comes from somebody who is about to ask something and still wants
+    // the answer. "be quiet" does not.
+    for (const said of ["be quiet", "assistant, shut up", "enough", "اسكت"]) {
+      expect(isDismissal(said, ["assistant"])).toBe(true);
+      expect(isVerbalInterrupt(said, ["assistant"])).toBe(true);
+    }
+    for (const said of ["wait", "hold on", "stop", "never mind"]) {
+      expect(isDismissal(said, ["assistant"])).toBe(false);
+      expect(isVerbalInterrupt(said, ["assistant"])).toBe(true);
+    }
+    expect(isDismissal("be quiet about the budget", ["assistant"])).toBe(false);
   });
 });
