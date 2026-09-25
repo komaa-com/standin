@@ -3,7 +3,7 @@
 
 """The messages lane: Microsoft Teams chat, without a bot credential.
 
-Managed connections only. StandIn owns the Microsoft Teams bot, authenticates the
+Only on the StandIn AI Teammate app. StandIn owns the Microsoft Teams bot, authenticates the
 activity, resolves it to your connection and strips the bot @mention. Your
 handler returns text and StandIn performs the Microsoft Teams send, so your agent never
 holds a Bot Framework credential.
@@ -447,7 +447,7 @@ class ChatChannel:
     """Answer Microsoft Teams messages with your agent.
 
     Dialed out from the worker, like the call lane, so nothing listens and there
-    is nothing to expose. Managed connections only, and that needs no flag: the
+    is nothing to expose. Only on the StandIn AI Teammate app, and that needs no flag: the
     socket authenticates with your connection secret, so if it opens at all you
     are managed.
 
@@ -458,7 +458,7 @@ class ChatChannel:
         secret: the key this lane signs with, defaulting to
             ``STANDIN_CHAT_SECRET`` and then to ``STANDIN_SECRET``.
 
-            A managed deployment issues a SECOND key for chat. That is
+            A StandIn AI Teammate app connection issues a SECOND key for chat. That is
             deliberate and worth keeping: the voice lane signs a WebSocket
             handshake and the chat lane signs an HTTP body, so a key that can
             forge one cannot forge the other. Setting the chat key is also what
@@ -505,7 +505,7 @@ class ChatChannel:
         if not self._secret:
             raise StandInError(
                 "a secret is required for the chat lane: pass secret=..., or set "
-                "STANDIN_CHAT_SECRET (a managed deployment issues a separate key for chat), "
+                "STANDIN_CHAT_SECRET (a StandIn AI Teammate app connection issues a separate key for chat), "
                 "or STANDIN_SECRET to use one key for both lanes"
             )
         self._respond = respond

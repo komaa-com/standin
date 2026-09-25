@@ -3,7 +3,7 @@
 
 """The chat lane signs with its own key.
 
-A managed deployment issues a second key for chat. Keeping the lanes separate is
+A StandIn AI Teammate app connection issues a second key for chat. Keeping the lanes separate is
 the point: the voice lane signs a WebSocket handshake and the chat lane signs an
 HTTP body, so a key that can forge one cannot forge the other.
 """

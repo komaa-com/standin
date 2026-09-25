@@ -495,7 +495,7 @@ Poster = Callable[[DeliveryTarget, str], Awaitable["PostOutcome | bool"]]
 #: minutes were coming with a document and then gets text with no explanation
 #: assumes the attachment was lost in transit and goes looking for it.
 DOCUMENT_NOT_ATTACHED = (
-    "(Minutes document is not attached on a StandIn managed connection - the text "
+    "(Minutes document is not attached on the StandIn AI Teammate app - the text "
     "above is the full record.)"
 )
 

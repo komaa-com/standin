@@ -321,8 +321,8 @@ for the same call has not finished tearing down.
 The diagnosis is this: the chat lane is dialed **out** by `ChatChannel`, so there is no mount
 to get wrong and no inbound request to lose. An empty log means the channel was never started, or it
 failed to open. Check that you called `start()` on it, that a secret is set in that process too, and
-that your identity is a managed connection: the chat lane exists only for those. The lane reads
-`STANDIN_CHAT_SECRET` first and falls back to `STANDIN_SECRET`, so a managed connection that issued
+that your identity is on the StandIn AI Teammate app: the chat lane exists only there. The lane reads
+`STANDIN_CHAT_SECRET` first and falls back to `STANDIN_SECRET`, so a StandIn AI Teammate app connection that issued
 a separate chat key needs that key here. Unset `STANDIN_CHAT_SECRET` rather than blanking it: in
 TypeScript an exported empty string counts as set and shadows a perfectly good `STANDIN_SECRET`, so
 the channel refuses to start at all, while in Python the blank falls through and the lane opens. Then
@@ -333,10 +333,9 @@ look for the `standin: chat channel open` line at startup. Without it, nothing i
 The plugin wrote the transcript (look under `STANDIN_RECAP_DIR` or `~/.standin/state/recap`) and
 then had nowhere this SDK can post.
 
-- **Sandbox:** no chat lane. Recap cannot deliver. [Tiers](/tiers#the-sandbox).
 - **Bring your own Azure bot / Free identity:** chat is your Azure Bot messaging URL, not
   `ChatChannel`. This switch will not post there. The host must also have a summarization consult.
-- **StandIn Managed Bot:** `ChatChannel` must actually open. Same checks as
+- **StandIn AI Teammate app:** `ChatChannel` must actually open. Same checks as
   [chat is silent](#voice-works-chat-is-silent-and-nothing-appears-in-any-log): secret, `start()`,
   and a chat key if StandIn issued a separate one. Recap opens the lane listen-only, so it will not
   answer chat even when posting works.
@@ -424,33 +423,16 @@ the call. An agent with an outbound tool and no allowlist is an agent that can b
 cold-calling your directory. Reaching people ([Python](/python-sdk/reaching-people),
 [TypeScript](/typescript-sdk/reaching-people)) has the rest of the lane.
 
-## Community tier: bot leaves or will not join (daily budget)
+## Free identity: bot leaves or will not join (daily budget)
 
-The community tier is metered: **5 minutes of bot time per day, per room**, and up to **5 new rooms
-per day** per account. When a room's budget runs out the bot leaves and returns the next day. Reusing
-an existing room does not count toward the room cap.
+A **free identity** is metered: **5 minutes of call time per day, per identity**. When the budget runs
+out the bot leaves and returns the next day.
 
 The cutoff is **abrupt**: at the 5-minute mark the bot leaves immediately, even mid-sentence, with
 no warning. A bot that "hung up out of nowhere" at around five minutes is the budget, not a fault.
 
-The same daily budget applies to a **free identity**, per identity. "The next day" flips at
-**midnight UTC**, not your local midnight, which is why a bot can work again "early in the morning"
-or "only after lunch" without anything having changed.
-
-## Community tier: the bot cannot join a meeting in your own tenant
-
-**Symptom:** instead of using the generated link, you try to get the shared bot into one of **your
-own** Microsoft Teams meetings, and no bot ever joins, with no visible error.
-
-This is a Microsoft Graph restriction, not a StandIn fault. A bot can only join meetings hosted in
-**its own tenant**; cross-tenant joins are rejected with error **7505**, an authorization tenant
-mismatch. The shared community bot lives in StandIn's tenant, so it can never join a meeting created
-in yours.
-
-**Fix:** use **Generate meeting link** in your sandbox room and share that link. The meeting is
-created where the bot is allowed to operate, and anyone joins it as a guest. If you need a bot that
-answers calls in **your own** tenant, that is the standard setup with your own Microsoft Teams bot: see the
-[quickstart](/quickstart).
+"The next day" flips at **midnight UTC**, not your local midnight, which is why a bot can work again
+"early in the morning" or "only after lunch" without anything having changed.
 
 ## A package name will not resolve
 
