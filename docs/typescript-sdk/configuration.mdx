@@ -18,7 +18,7 @@ beats an environment value.
 | Variable | Default | What reads it, and what it does |
 |---|---|---|
 | `STANDIN_SECRET` | none | Your StandIn connection secret. `CallServer`, `ChatChannel` and `OutboundCaller` all refuse to construct without one. |
-| `STANDIN_CHAT_SECRET` | falls back to `STANDIN_SECRET` | The key the chat lane signs with, read before `STANDIN_SECRET`. A managed deployment issues a separate key for chat; with one key for both lanes, leave this unset. |
+| `STANDIN_CHAT_SECRET` | falls back to `STANDIN_SECRET` | The key the chat lane signs with, read before `STANDIN_SECRET`. A StandIn AI Teammate app connection issues a separate key for chat; with one key for both lanes, leave this unset. |
 | `STANDIN_HOST` | `0.0.0.0` | Bind address for the call listener. |
 | `STANDIN_PORT` | `9442` | Port for the call listener. |
 | `STANDIN_WS_PATH` | `/msteams/calling` | The path StandIn dials on your worker. |

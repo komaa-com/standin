@@ -457,7 +457,7 @@ export type Poster = (
  * assumes the attachment was lost in transit and goes looking for it.
  */
 export const DOCUMENT_NOT_ATTACHED =
-  "(Minutes document is not attached on a StandIn managed connection - the text " +
+  "(Minutes document is not attached on the StandIn AI Teammate app - the text " +
   "above is the full record.)";
 
 /** Options for {@link postMinutes}. */

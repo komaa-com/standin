@@ -1,33 +1,34 @@
 ---
 title: "Connection modes"
-description: "Two ways to put your agent in Microsoft Teams: the StandIn Managed Bot from the Microsoft Teams Store, or your own Azure bot."
-keywords: ["StandIn Managed Bot","Microsoft Teams Store","Azure bot","bring your own bot","multi-tenant Microsoft Teams bot"]
+description: "Two ways to put your agent in Microsoft Teams: the StandIn AI Teammate app from the Microsoft Teams Store, or your own Azure bot."
+keywords: ["StandIn AI Teammate","Microsoft Teams Store","Azure bot","bring your own bot","multi-tenant Microsoft Teams bot"]
 ---
 
 There are two ways to connect an agent to Microsoft Teams. They differ in **who owns the Microsoft Teams bot**,
 and that single difference decides how much Azure work you do.
 
-| | StandIn Managed Bot | Bring your own Azure bot |
+| | StandIn AI Teammate app | Bring your own Azure bot |
 |---|---|---|
 | Who owns the bot | StandIn | You |
 | Azure app registration | none | you create it |
 | App ID / client secret | none | you manage them |
-| Install | add **StandIn** from the Microsoft Teams Store | upload your own app package |
+| Install | add **StandIn AI Teammate** from the [Microsoft Teams Store](https://teams.microsoft.com/l/app/efcbbdea-3d93-47f7-b106-f2c33126d0b5) | upload your own app package |
 | Identity in Microsoft Teams | appears as StandIn | appears as your own bot |
 | Best for | getting working quickly | full identity custody |
 
 Both modes connect **your own agent**: StandIn is the bridge, never the brain. And both need the same
 one-time admin consent before calling works - chat works without it.
 
-## StandIn Managed Bot
+## StandIn AI Teammate app
 
 StandIn publishes and operates one Microsoft Teams bot; your Microsoft organization is routed to your agent by
 a connection you create in the StandIn portal.
 
-1. In Microsoft Teams, add **StandIn** from the Store.
+1. In Microsoft Teams, add **StandIn AI Teammate** from the Store: [open it in Microsoft Teams](https://teams.microsoft.com/l/app/efcbbdea-3d93-47f7-b106-f2c33126d0b5), or find it
+   in [Microsoft Marketplace](https://marketplace.microsoft.com/en-us/product/office/WA200012046).
 2. Type `signin` to the bot and sign in with your StandIn account. That link is how StandIn learns
    which Microsoft organization to connect - you do not type a tenant id anywhere.
-3. In the StandIn portal, deploy an identity and choose **Use the StandIn bot**. Paste your agent's
+3. In the StandIn portal, deploy an identity and choose **Use the StandIn AI Teammate app**. Paste your agent's
    address; the portal gives you back the secrets.
 4. A Microsoft 365 administrator approves calling once for the organization. Chat works before this;
    calling switches on when the approval lands.
@@ -38,16 +39,16 @@ You get a **connection secret**, and on this SDK it is one environment variable:
 export STANDIN_SECRET='<the connection secret from the portal>'
 ```
 
-A managed deployment may issue a **second key for chat**. That is deliberate, not an oversight:
+A StandIn AI Teammate app connection may issue a **second key for chat**. That is deliberate, not an oversight:
 each lane signs its own handshake, so two keys mean a key that can open one lane cannot open the
 other. If you are given one, export it as `STANDIN_CHAT_SECRET` and the chat lane signs with that
 instead. `ChatChannel` reads `STANDIN_CHAT_SECRET` first and falls back to `STANDIN_SECRET`, so
 when a single key covers both lanes there is nothing extra to set.
 
-The managed bot is also what unlocks the SDK's chat lane. `ChatChannel` dials **out** to StandIn
+The StandIn AI Teammate app is also what unlocks the SDK's chat lane. `ChatChannel` dials **out** to StandIn
 with whichever of those two keys it found, so chat needs no URL registered, no open port and no
 tunnel rule, and your agent never holds a Bot Framework credential. It needs no flag either: if the
-socket opens, you are managed.
+socket opens, you are on the StandIn AI Teammate app.
 
 <Note>
 One agent instance serves **one** connection. The secrets belong to a single Microsoft organization -
@@ -74,7 +75,7 @@ worker uses a different path.
 | Lane | Public contract | Auth | What you expose |
 |---|---|---|---|
 | Calling, both modes | WebSocket `wss://host/msteams/calling/{callId}` | HMAC handshake with `STANDIN_SECRET` | the call listener (`STANDIN_PORT` / `STANDIN_WS_PATH`, defaults `9442` and `/msteams/calling`) |
-| Chat, **StandIn Managed Bot** | the worker dials `STANDIN_CHAT_URL` (default `wss://teams.standin.komaa.com/api/chat/channel`) | HMAC with `STANDIN_CHAT_SECRET`, else `STANDIN_SECRET` | nothing inbound |
+| Chat, **StandIn AI Teammate app** | the worker dials `STANDIN_CHAT_URL` (default `wss://teams.standin.komaa.com/api/chat/channel`) | HMAC with `STANDIN_CHAT_SECRET`, else `STANDIN_SECRET` | nothing inbound |
 | Chat, **bring your own Azure bot** | the messaging URL on your Azure Bot | your Azure Bot credentials, not this SDK | not this SDK; the portal shows the value to register |
 
 A bring-your-own-bot identity answers Microsoft Teams chat on that Azure Bot messaging URL, not

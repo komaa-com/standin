@@ -131,7 +131,7 @@ OpenClaw agent's tools, skills and memory from inside a call is on the roadmap.
 | `inboundGreeting` | Spoken on pickup. Omit and the agent waits for the caller. |
 | `requireRecordingStatus` | Hold caller media until Microsoft Teams reports recording active. |
 | `sessionScope` | Memory of the agent session that writes the minutes: `per-call` (default), `per-thread`, or `per-aad`. The voice session itself is always per call. |
-| `meetingRecap` | After the call ends, write minutes into the Microsoft Teams chat. Off by default. Needs the StandIn chat lane (managed bot) and a summarization consult. Hang-up does not await the post. Meeting recaps are best-effort. They may be lost if the worker exits during processing. Restart-recoverable local spool of customer meeting data (`STANDIN_RECAP_DIR`). |
+| `meetingRecap` | After the call ends, write minutes into the Microsoft Teams chat. Off by default. Needs the StandIn chat lane (StandIn AI Teammate app) and a summarization consult. Hang-up does not await the post. Meeting recaps are best-effort. They may be lost if the worker exits during processing. Restart-recoverable local spool of customer meeting data (`STANDIN_RECAP_DIR`). |
 | `realtime.*` | Provider selection, instructions, and the echo guard's tunables. |
 
 ## Working on the plugin

@@ -224,8 +224,8 @@ This is the difference from the OpenClaw plugin. OpenClaw always opens a dedicat
 </Note>
 
 <Warning>
-Delivery uses StandIn's outbound chat socket. That socket exists on the **StandIn Managed Bot**
-([Tiers](/tiers)). The sandbox has no chat lane. A bring-your-own-bot identity answers chat through
+Delivery uses StandIn's outbound chat socket. That socket exists on the **StandIn AI Teammate app**
+([Tiers](/tiers)). A bring-your-own-bot identity answers chat through
 its Azure Bot messaging URL, not this socket, so this switch will not post there. Put
 `STANDIN_RECAP_DIR` on persistent storage when recap reliability matters. A directory that dies with
 the process loses unfinished minutes.

@@ -43,7 +43,7 @@ await chat.start();
 
 `ChatChannel` throws a `StandInError` at construction when no secret is available. Managed
 connections only, and that needs no flag: the socket authenticates with your connection secret, so if
-it opens at all you are managed. The [sandbox](/tiers#the-sandbox) has no chat lane. A meeting recap
+it opens at all you are on the StandIn AI Teammate app. A meeting recap
 that only posts uses `listenOnly: true` so it never answers.
 
 ## Meeting recap
@@ -66,7 +66,7 @@ Meeting recaps are best-effort. They may be lost if the worker exits during proc
 
 ### Which secret
 
-A managed deployment can be issued a **separate key for chat**. When it is, set `STANDIN_CHAT_SECRET`
+A StandIn AI Teammate app connection can be issued a **separate key for chat**. When it is, set `STANDIN_CHAT_SECRET`
 and it wins; with one key for both lanes, set only `STANDIN_SECRET` and this lane falls back to it. A
 key scoped to one lane cannot be used on the other, which is the point of issuing two.
 

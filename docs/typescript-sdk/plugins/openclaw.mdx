@@ -114,7 +114,7 @@ Call your StandIn number.
 | `inboundGreeting` | Spoken on pickup. Omit it and the agent waits for the caller to speak first. |
 | `requireRecordingStatus` | Hold caller media until Microsoft Teams reports recording active. |
 | `sessionScope` | Memory of the agent session that writes the minutes: `per-call` (default), `per-thread`, or `per-aad`. The voice session is always per call. |
-| `meetingRecap` | After the call ends, post minutes into the Microsoft Teams chat. Off unless exactly `true`. Needs the StandIn chat lane ([Tiers](/tiers#the-standin-managed-bot)) and a summarization consult. Best-effort: hang-up does not await the post. |
+| `meetingRecap` | After the call ends, post minutes into the Microsoft Teams chat. Off unless exactly `true`. Needs the StandIn chat lane ([Tiers](/tiers#the-standin-ai-teammate-app)) and a summarization consult. Best-effort: hang-up does not await the post. |
 | `realtime.provider` / `realtime.providers` | Provider selection and its credentials. |
 | `realtime.instructions` | The system prompt for the call. |
 | `realtime.suppressInputDuringPlayback` | Echo guard on or off. On by default. |
@@ -260,8 +260,8 @@ Off until you set `meetingRecap: true`. The plugin then:
 The host must provide an outbound chat lane and a summarization consult. Hang-up does not wait for the consult. A recap that cannot open the chat lane is logged and not posted. Meeting recaps are best-effort. They may be lost if the worker exits during processing.
 
 <Warning>
-Delivery uses StandIn's outbound chat socket. That socket exists on the **StandIn Managed Bot**
-([Tiers](/tiers)). The sandbox has no chat lane. A bring-your-own-bot identity answers chat through
+Delivery uses StandIn's outbound chat socket. That socket exists on the **StandIn AI Teammate app**
+([Tiers](/tiers)). A bring-your-own-bot identity answers chat through
 its Azure Bot messaging URL, not this socket, so this switch will not post there. Put
 `STANDIN_RECAP_DIR` on persistent storage when recap reliability matters. A directory that dies with
 the process loses unfinished minutes.

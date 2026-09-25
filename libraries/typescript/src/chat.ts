@@ -4,7 +4,7 @@
 /**
  * The messages lane: Microsoft Teams chat, without a bot credential.
  *
- * Managed connections only. StandIn owns the Microsoft Teams bot, authenticates the
+ * Only on the StandIn AI Teammate app. StandIn owns the Microsoft Teams bot, authenticates the
  * activity, resolves it to your connection and strips the bot @mention. Your
  * handler returns text and StandIn performs the Microsoft Teams send, so your agent never
  * holds a Bot Framework credential.
@@ -541,7 +541,7 @@ export interface ChatChannelOptions {
  * Answer Microsoft Teams messages with your agent.
  *
  * Dialed out from the worker, like the call lane, so nothing listens and there
- * is nothing to expose. Managed connections only, and that needs no flag: the
+ * is nothing to expose. Only on the StandIn AI Teammate app, and that needs no flag: the
  * socket authenticates with your connection secret, so if it opens at all you
  * are managed.
  *

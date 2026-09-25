@@ -17,7 +17,7 @@ flowchart TD
   G --> T2["StandIn sends it to Microsoft Teams"]
 ```
 
-Managed connections only, and that needs no flag: the socket authenticates with your connection secret, so if it opens at all you are managed. The [sandbox](/tiers#the-sandbox) has no chat lane. A meeting recap that only posts uses `listen_only=True` so it never answers.
+Only on the StandIn AI Teammate app, and that needs no flag: the socket authenticates with your connection secret, so if it opens at all you are on the StandIn AI Teammate app. A meeting recap that only posts uses `listen_only=True` so it never answers.
 
 ## Meeting recap
 
@@ -69,7 +69,7 @@ ChatChannel(*, respond, secret=None, url=None, chats=None, listen_only=False)
 
 ### Which secret
 
-A managed deployment may issue a **separate key for chat**. When it does, set `STANDIN_CHAT_SECRET` and it wins; with one key for both lanes, set only `STANDIN_SECRET` and the chat lane falls back to it. A key scoped to one lane cannot be used on the other, which is the point of issuing two.
+A StandIn AI Teammate app connection may issue a **separate key for chat**. When it does, set `STANDIN_CHAT_SECRET` and it wins; with one key for both lanes, set only `STANDIN_SECRET` and the chat lane falls back to it. A key scoped to one lane cannot be used on the other, which is the point of issuing two.
 
 <Note>
 In Python a blank `STANDIN_CHAT_SECRET` falls through to `STANDIN_SECRET`; the TypeScript twin stops at the first variable that is merely present. Unset the variable rather than blanking it and the two behave alike. See [Configuration](/python-sdk/configuration).

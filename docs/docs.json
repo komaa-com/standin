@@ -60,7 +60,6 @@
             "pages": [
               "tiers",
               "expose",
-              "community",
               "troubleshooting"
             ]
           }
@@ -201,6 +200,10 @@
     {
       "source": "/elevenlabs/:slug*",
       "destination": "/python-sdk/plugins/elevenlabs"
+    },
+    {
+      "source": "/community",
+      "destination": "/tiers"
     }
   ],
   "logo": {
@@ -209,6 +212,10 @@
   },
   "navbar": {
     "links": [
+      {
+        "label": "Add to Microsoft Teams",
+        "href": "https://teams.microsoft.com/l/app/efcbbdea-3d93-47f7-b106-f2c33126d0b5"
+      },
       {
         "label": "GitHub",
         "href": "https://github.com/komaa-com/standin"

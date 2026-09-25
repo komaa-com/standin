@@ -41,7 +41,7 @@ export STANDIN_HOST="127.0.0.1"
 | `STANDIN_PORT` | `9442` | Port the call listener binds. |
 | `STANDIN_HOST` | `0.0.0.0` | Bind address. |
 | `STANDIN_WS_PATH` | `/msteams/calling` | Path StandIn dials. |
-| `STANDIN_CHAT_SECRET` | `STANDIN_SECRET` | The key the chat lane signs with. A managed deployment may issue a separate key for chat, and this one wins when it is set. See [Chat](/python-sdk/chat#which-secret). |
+| `STANDIN_CHAT_SECRET` | `STANDIN_SECRET` | The key the chat lane signs with. A StandIn AI Teammate app connection may issue a separate key for chat, and this one wins when it is set. See [Chat](/python-sdk/chat#which-secret). |
 | `STANDIN_CHAT_URL` | `wss://teams.standin.komaa.com/api/chat/channel` | Chat channel the worker dials out to. Only used by [ChatChannel](/python-sdk/chat). |
 
 Those six are all the call and chat lanes read. The other lanes have their own, and

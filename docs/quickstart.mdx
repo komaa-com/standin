@@ -13,7 +13,7 @@ correct, and every later failure is your agent's.
 - A **StandIn identity** at [standin.komaa.com](https://standin.komaa.com). This is the hosted
   service that joins the Microsoft Teams call and dials your worker.
 - A **Microsoft Teams identity** for the bot. This is the choice that decides how much Azure work you do:
-  - **Install StandIn from the Microsoft Teams Store.** No Azure app registration, no App ID, no
+  - **Install StandIn AI Teammate from the [Microsoft Teams Store](https://teams.microsoft.com/l/app/efcbbdea-3d93-47f7-b106-f2c33126d0b5)** ([Microsoft Marketplace listing](https://marketplace.microsoft.com/en-us/product/office/WA200012046)). No Azure app registration, no App ID, no
     client secret. Add the app, type `signin`, and connect your agent from the StandIn portal. A
     Microsoft 365 admin approves calling once for the organization.
   - **Bring your own Microsoft Teams bot** (an Azure Entra app) and connect it to StandIn. See
@@ -28,8 +28,8 @@ correct, and every later failure is your agent's.
   [Expose your agent](/expose) covers both.
 
 <Tip>
-To hear an agent talk with **no Microsoft Teams identity at all**, a shared StandIn bot can join a public
-meeting StandIn generates. See [Sandbox (community tier)](/community). It is metered.
+No Azure bot of your own? [Add StandIn AI Teammate to Microsoft Teams](https://teams.microsoft.com/l/app/efcbbdea-3d93-47f7-b106-f2c33126d0b5) and connect it as the
+[StandIn AI Teammate app](/teams/connection-modes#standin-ai-teammate-app). There is nothing to register in Azure.
 </Tip>
 
 ## 1. Run the echo
@@ -113,7 +113,7 @@ variables below. These are the variables this page uses:
 | `STANDIN_HOST` | `0.0.0.0` | Bind address. Set `127.0.0.1` when a tunnel is in front. |
 | `STANDIN_WS_PATH` | `/msteams/calling` | Path StandIn dials. StandIn appends `/{callId}` per call. |
 | `STANDIN_CHAT_URL` | StandIn's chat channel | Only for the outbound chat lane. Override it when StandIn gives you a different chat address. |
-| `STANDIN_CHAT_SECRET` | falls back to `STANDIN_SECRET` | Only for the chat lane. A managed connection may issue a second key for chat; set it and the chat lane signs with that one instead. |
+| `STANDIN_CHAT_SECRET` | falls back to `STANDIN_SECRET` | Only for the chat lane. A StandIn AI Teammate app connection may issue a second key for chat; set it and the chat lane signs with that one instead. |
 
 Those are the ones the echo and the chat lane need, not the whole list: placing a call, vision,
 sending a picture and the on-disk state directory each read their own, and the two SDKs do not read
